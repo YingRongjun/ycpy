@@ -1,0 +1,31 @@
+#!/bin/sh
+# ycpy 输入法引擎启动器。ibus-daemon 会直接执行这个文件。
+#
+# 引擎必须能 import 到 ycpy 包，而 ibus 拉起子进程时的工作目录是不可控的，
+# 所以这里显式设置 PYTHONPATH。
+
+set -e
+
+self="$0"
+case "$self" in
+    */*) ;;
+    *) self="$(command -v "$self")" ;;
+esac
+here="$(cd "$(dirname "$self")" && pwd)"
+
+if [ -n "${PYTHONPATH:-}" ]; then
+    PYTHONPATH="$here:$PYTHONPATH"
+else
+    PYTHONPATH="$here"
+fi
+export PYTHONPATH
+
+for candidate in "${PYIM_PYTHON:-}" /usr/bin/python3 python3; do
+    [ -n "$candidate" ] || continue
+    if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+        exec "$candidate" -B -m ycpy "$@"
+    fi
+done
+
+echo "ycpy: 找不到可用的 python3（需要 3.9+）" >&2
+exit 1

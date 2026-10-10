@@ -1,0 +1,29 @@
+#!/bin/sh
+# ycpy 安装后处理。
+#
+# 关键点：**不要往 ~/.config/environment.d 写东西**。
+# 那属于当前登录用户，而 postinst 是以 root 跑的，代写会导致属主错乱，
+# 而且只对 root 生效、对其他用户无效。系统组件模式下根本不需要它——
+# ibus 默认就扫 /usr/share/ibus/component（这正是把组件装到那里的意义）。
+set -e
+
+# ibus 1.5.x 只在 daemon **启动时**扫一次组件目录，而且把注册表缓存写进
+# ~/.cache/ibus/bus/registry。装完必须清掉这个缓存并重启 daemon，
+# 否则新组件要等下次注销才生效。
+# 注意不是「重启 GNOME 桌面」——ibus-daemon 是独立进程，可以单独重启。
+if command -v ibus >/dev/null 2>&1; then
+    # 这里**不能**删 /root/.cache（那是 root 的），只能提示用户自己清。
+    # 实际上 daemon 会以登录用户身份重启，缓存由它自己重建。
+    if command -v ibus >/dev/null 2>&1; then
+        ibus restart >/dev/null 2>&1 || true
+    fi
+fi
+
+echo "ycpy 已安装。"
+echo
+echo "如果 GNOME 的输入法列表里还看不到 ycpy，执行："
+echo "  rm -f ~/.cache/ibus/bus/registry   # 组件注册表缓存，改了组件目录要删"
+echo "  ibus restart                         # 或注销重登"
+echo
+echo "在「设置 → 键盘 → 输入源」里添加 ycpy 即可使用。"
+echo "首选项界面：点右上角输入法图标 → 「首选项…」"

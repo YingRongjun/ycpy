@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=瀛澈拼音
+Name[zh_CN]=瀛澈拼音
+Comment=设置候选词数量、中英文切换快捷键、联想等
+Exec=__PREF__
+Icon=ycpy
+Terminal=false
+StartupNotify=true
+Categories=Settings;Keyboard;
+Keywords=pinyin;input;ime;拼音;输入法;
+X-GNOME-UsesNotifications=false

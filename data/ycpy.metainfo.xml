@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream 元数据。
+
+  为什么必须有这个文件
+  ==================
+  Ubuntu 的「应用中心」（snap-store）显示一个 deb 的名称、描述、许可证，
+  读的是 /usr/share/metainfo/*.metainfo.xml；找不到才退回解析 deb 的
+  DEBIAN/control。退回那条路有两个后果（都是实测踩到的）：
+
+    1. 许可显示成 unknown —— control 里根本没有 License 字段
+       （Debian policy 压根没定义这个字段，许可证信息按惯例放在 Description 里）。
+    2. 中文描述显示成问号 —— control 的 Description 虽然是合法 UTF-8，
+       但 snap-store 的 deb 解析器不按 UTF-8 读它，非 ASCII 字节全被替换掉。
+
+  metainfo 是严格 UTF-8 的 XML，优先级更高，两个问题一起解决。
+
+  注意：本文件必须是合法 UTF-8 XML，且注释里不能出现连续两个连字符
+  （XML 语法不允许）——否则 AppStream 会静默忽略整个文件，
+  症状与「没有这个文件」完全一样，极难排查。
+  写完务必用下面这行验证一遍：
+
+      python3 -c "import xml.etree.ElementTree as E; E.parse('data/ycpy.metainfo.xml')"
+-->
+<component type="desktop-application">
+  <id>ycpy.pinyin.assist</id>
+
+  <!-- 元数据本身的许可用 CC0-1.0（AppStream 惯例），与项目代码的协议无关。 -->
+  <metadata_license>CC0-1.0</metadata_license>
+  <!-- GPL-3.0-or-later：词典里的整句词频取自 rime-frost 的 知频.txt
+       （GPL-3.0），这决定了整个项目的协议。 -->
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>瀛澈拼音</name>
+  <name xml:lang="zh_CN">瀛澈拼音</name>
+
+  <summary>瀛澈拼音 —— 纯 Python 编写的 IBus 拼音输入法</summary>
+  <summary xml:lang="zh_CN">瀛澈拼音 —— 纯 Python 编写的 IBus 拼音输入法</summary>
+
+  <developer_name>YingRongjun</developer_name>
+
+  <description>
+    <p>
+      瀛澈拼音是一个用纯 Python 实现的 IBus 拼音输入法，不需要编译器，
+      也没有额外的 Python 依赖。
+    </p>
+    <p>主要特性：</p>
+    <ul>
+      <li>全拼输入，例如 chengxuyuanji 得到「程序员」</li>
+      <li>首字母与声母缩写输入，例如 cxy 同样得到「程序员」</li>
+      <li>模糊容错：漏键、多键、声母韵母顺序颠倒都能猜到</li>
+      <li>联想候选，按你自己上文的用词排序</li>
+      <li>词频学习，越用越顺手</li>
+      <li>整句分词，例如 dajiayiqiganhuo 直接拼出「大家一起干活」</li>
+    </ul>
+    <p>
+      全部词典由公开语料统计生成，不含任何手工编写的词库；
+      各数据源的来源与授权见 /usr/share/doc/ycpy/CREDITS.md。
+    </p>
+  </description>
+
+  <categories>
+    <category>Utility</category>
+    <category>InputMethod</category>
+  </categories>
+
+  <keywords>
+    <keyword>pinyin</keyword>
+    <keyword>input method</keyword>
+    <keyword>拼音</keyword>
+    <keyword>输入法</keyword>
+  </keywords>
+
+  <provides>
+    <binary>ycpy-engine</binary>
+    <binary>ycpy-preferences</binary>
+  </provides>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.0.0" date="2026-10-09">
+      <description>
+        <p>首个 deb 包版本。</p>
+        <ul>
+          <li>全拼、首字母简拼、模糊容错、联想候选、词频学习、整句分词</li>
+          <li>单字排序以语料字频为主信号</li>
+          <li>繁体字统一排在简体之后</li>
+          <li>组件装在系统目录，装完不需要注销重登即可生效</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+
+  <launchable type="desktop-id">ibus-setup-ycpy.desktop</launchable>
+</component>

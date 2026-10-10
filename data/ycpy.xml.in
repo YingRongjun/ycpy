@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  瀛澈拼音 —— ibus 组件描述（由 tools/build_deb.sh 装进 /usr/share/ibus/component）。
+
+  <name> 必须与引擎进程启动后申请的总线名一致，ibus-daemon 靠 NameOwnerChanged
+  信号发现「这个组件已经起来了」，然后回调 CreateEngine 拿到引擎对象路径。
+  <exec> 里的占位符由 tools/build_deb.sh 替换成实际路径。
+
+  注意：ibus 1.5.x 默认不读用户目录下的组件 XML，所以装进系统目录是
+  唯一能立刻生效的办法；引擎自注册（ycpy/register.py）只是兜底。
+
+  千万别在这个注释里写连续的两个连字符（比如某条命令行选项的写法）：
+  XML 注释内部不允许出现双连字符，写了整个文件就变成非法 XML，
+  ibus-daemon 会静默跳过它，表现为「GNOME 的输入法列表里没有 ycpy」
+  而且没有任何报错。
+  （这一段警示本身就是踩过这个坑之后加的——当时注释里为了说明用法写了
+  一个带双连字符的命令行选项，整个文件当场变成非法 XML。）
+-->
+<component>
+  <name>ycpy.pinyin.assist</name>
+  <description>瀛澈拼音（纯 Python，支持首字母与联想）</description>
+  <exec>__EXEC__</exec>
+  <version>1.0.0</version>
+  <license>GPL-3.0-or-later</license>
+  <author>YingRongjun</author>
+  <textdomain>ycpy</textdomain>
+
+  <engines>
+    <engine>
+      <name>ycpy</name>
+      <language>zh_CN</language>
+      <longname>瀛澈拼音</longname>
+      <symbol>拼</symbol>
+      <icon>ycpy</icon>
+      <rank>90</rank>
+      <layout>us</layout>
+      <version>1.0.0</version>
+      <setup>__PREF__</setup>
+    </engine>
+  </engines>
+</component>

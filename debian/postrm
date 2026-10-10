@@ -1,0 +1,40 @@
+#!/bin/sh
+# ycpy 卸载后处理。
+#
+# 上一版是「彻底删除」（purge），这一版是「移除但保留配置」——
+# dpkg -r 走这个脚本：删掉系统组件，但**保留**用户的词频学习数据
+# （~/.config/py-pinyin-ibus/ 和 ~/.local/share/py-pinyin-ibus/）。
+#
+# 这么区分是有意的：用户词库是长期积累的，为了升级输入法而清掉代价太大。
+# 真想彻底删，让用户用 `dpkg -P ycpy`，那是 dpkg 自己的 purge 逻辑，
+# 不会调这个脚本（postrm 只在 configure 阶段有 abort/error 分支时带参数）。
+set -e
+
+# **不要**在这里 rm 任何绝对路径的文件。
+#
+# dpkg 自己会删掉包文件清单里的东西（包括 /usr/share/ibus/component/ycpy.xml），
+# 脚本再去 rm 一遍是多余的；更要紧的是，在 `dpkg --force-script-chrootless`
+# 下维护脚本**不进 chroot**直接跑在真实根文件系统上，此时
+# `rm -f /usr/share/...` 会打到真正的系统目录——调试时用这个 flag
+# （不需要 root），脚本里的绝对路径就成了真刀真枪。
+# 之前这脚本里就有两行这样的 rm，是这个测试过程里才暴露出来的。
+
+# ibus 的注册表缓存在**每个登录用户**的 ~/.cache/ibus/bus/registry 下，
+# 属于用户数据，不该（也没法）在这里清。只提示用户。
+if command -v ibus >/dev/null 2>&1; then
+    ibus restart >/dev/null 2>&1 || true
+fi
+
+cat <<'EOF'
+ycpy 已移除。
+
+如果 GNOME 的输入法列表里还残留 ycpy，执行：
+  rm -f ~/.cache/ibus/bus/registry    # 组件注册表缓存
+  ibus restart
+
+你的词频学习数据仍然保留：
+  ~/.config/py-pinyin-ibus/          配置
+  ~/.local/share/py-pinyin-ibus/     词频库
+想连这些一起删掉，请手动 rm -rf 上面两个目录。
+EOF
+exit 0

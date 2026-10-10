@@ -1,0 +1,74 @@
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 构建产物
+build/
+dist/
+*.deb
+
+# 运行期缓存（索引、字体覆盖表）
+*.bin
+.cache/
+
+# ---------------------------------------------------------------------------
+# 词典数据：全部由 tools/ 下的脚本生成，**不进版本库**
+#
+# 理由：这些文件加起来 30 MB，内容是机械生成的大表——进 git 只会让 clone
+# 变慢、diff 全是噪声，而且每次改生成逻辑都要提交一个巨大的二进制 diff。
+#
+# 需要它们时按 README「数据是怎么来的」那节跑一遍构建脚本即可（带缓存，
+# 第一次需要联网）。三条命令：
+#
+#     python3 tools/build_dict.py         # 主词典 + 搭配表 + Unihan 分级
+#     python3 tools/build_phrase_freq.py  # 口语整句词频
+#     python3 tools/build_domain_dict.py  # 专业领域词表
+#
+# 注意 data/CREDITS.md、data/LICENSE-hanziDB.txt 这两个**必须**提交——
+# 它们是各上游数据源的授权声明，MIT 与 Unicode License V3 都要求随分发提供。
+data/ycpy-dict.txt
+data/ycpy-next.txt
+data/ycpy-char-next.txt
+data/ycpy-phrase-freq.txt
+data/ycpy-char-freq.txt
+data/ycpy-trad.txt
+data/ycpy-domain-*.txt
+data/Unihan_IRGSources.txt
+
+# ---------------------------------------------------------------------------
+# 不该进版本库的东西
+#
+# 用户的词频学习数据与首选项配置放在 XDG 目录下，本来就不在仓库里，但
+# 显式列出来更保险——万一有人把 XDG 环境变量指到项目目录里跑压测。
+user.json
+config.json
+*.stress-bak
+*.bak-*
+
+# 压测产物
+/tmp/
+*.jsonl
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Python 打包/测试工具的产物（tools/ 下跑 pytest、coverage 之类会生成）
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 说明：tools/ 与 tests/ 里的脚本**全部提交**，不要忽略。
+#
+# tools/ 下的 5 个 build_*.py 是词典的唯一来源——数据不进版本库（30 MB 的
+# 机械生成大表），所以「怎么生成」这件事本身必须留档，否则 clone 之后无从
+# 复现。repro_*.py / stress_*.py 是 bug 的复现证据：对应的 bug 都已有单元
+# 测试覆盖，但这些脚本记录的是「怎么在真实 GTK 应用里用 XTEST 注入复现」，
+# 单元测试替代不了。
+#
+# tests/test_core.py 是唯一的测试入口，离线可跑（python3 -B -m unittest
+# discover -s tests），是这份代码敢开源的底气。

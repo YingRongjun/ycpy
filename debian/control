@@ -1,0 +1,30 @@
+Package: ycpy
+Version: 1.0.0
+Section: misc
+Priority: optional
+Architecture: amd64
+Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-3.0, ibus (>= 1.5)
+Recommends: fonts-noto-cjk
+Maintainer: YingRongjun <52067369@qq.com>
+Description: Yingche Pinyin - Pinyin input method for IBus (written in Python)
+ Supports full pinyin, initial-letter shorthand, fuzzy typo tolerance,
+ associative candidates, word-frequency learning and whole-sentence
+ segmentation. Pure Python: no compiler and no extra Python packages
+ are required.
+ .
+ The dictionaries are all built from public corpora and statistics
+ (jieba word frequencies, Jun Da's Modern Chinese Character Frequency
+ List, Unicode Unihan). No word list is hand-written. See
+ /usr/share/doc/ycpy/CREDITS.md for sources and licences.
+ .
+ The ibus component is installed under /usr/share/ibus/component, so
+ ibus-daemon picks it up on its next start - no logout/login needed.
+ ycpy shows up in the GNOME input source list right away.
+ .
+ Licensed under the GNU General Public License v3 or later. The
+ dictionaries themselves carry their own upstream licences - the
+ whole-sentence frequency table comes from rime-frost (GPL-3.0),
+ which is why the project is GPL-3.0-or-later; see
+ /usr/share/doc/ycpy/CREDITS.md for the full audit.
+ Chinese description: /usr/share/doc/ycpy/copyright and the AppStream
+ metadata /usr/share/metainfo/ycpy.metainfo.xml
