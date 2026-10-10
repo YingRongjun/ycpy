@@ -1534,6 +1534,39 @@ class EngineTest(unittest.TestCase):
             self.engine.process_key(ord(src), 0, 1 << 0)
             self.assertEqual(self.ui.commits, [want])
 
+    def test_backslash_is_dunhao(self):
+        """反斜杠出顿号——与主流输入法的键位一致。
+
+        用户报「输入 \\ 应该是中文顿号」。原先映射到全角「＼」。
+        """
+        del self.ui.commits[:]
+        self.assertTrue(self.engine.process_key(ord("\\")))
+        self.assertEqual(self.ui.commits, ["、"])
+
+    def test_pipe_stays_pipe(self):
+        """竖线不再被吞成全角反斜杠。
+
+        改顿号时顺带暴露的 bug：原先「\\」映射到全角「＼」，于是竖线
+        根本打不出来。
+        """
+        del self.ui.commits[:]
+        self.engine.process_key(ord("|"), 0, 1 << 0)
+        self.assertEqual(self.ui.commits, ["|"])
+
+    def test_pipe_never_enters_composition(self):
+        """竖线不该被当成拼音去组字。"""
+        del self.ui.commits[:]
+        self.assertTrue(self.engine.process_key(ord("|"), 0, 1 << 0))
+        self.assertEqual(self.engine.state, ST_IDLE)
+        self.assertEqual(self.engine.buffer, "")
+
+    def test_dunhao_on_both_backslash_and_grave(self):
+        """顿号在反斜杠和反引号上都有——哪个顺手按哪个。"""
+        for key in ("\\", "`"):
+            del self.ui.commits[:]
+            self.assertTrue(self.engine.process_key(ord(key)), repr(key))
+            self.assertEqual(self.ui.commits, ["、"], repr(key))
+
     def test_punctuation_commits_composition_first(self):
         """组字中打标点：先上屏候选词，再上屏标点。"""
         del self.ui.commits[:]
