@@ -184,6 +184,72 @@ class UserModelTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.path = os.path.join(self.tmp, "user.json")
 
+    def test_load_survives_corrupted_files(self):
+        """**load() 绝不能抛异常**——它在 ``__init__`` 里，是引擎的启动路径。
+
+        坏文件让输入法完全起不来，比「词频丢了」严重得多。
+
+        实测过的坏形态（每一条都能让原实现崩）：``{"words":{"你好":"abc"}}``
+        和 ``{"words":{"你好":null}}`` 崩在 ``int()``；顶层是数组或 ``null``
+        崩在 ``.get()``。原来的 ``try`` 只包住了 ``json.load``，后面两个都在
+        外面。
+        """
+        broken = [
+            "{ not json",
+            '{"version":2,"words":{"你好":3}}',
+            '{"version":1,"words":{"你好":"abc"}}',
+            '{"version":1,"words":{"你好":null}}',
+            '{"version":1,"words":{"你好":true}}',
+            '{"version":1,"words":{"你好":[1]}}',
+            '{"version":1,"words":{},"bigrams":{"a|b":"x"}}',
+            "[1,2,3]",
+            "null",
+            '"hello"',
+            '{"version":1,"words":[1,2]}',
+            "",
+        ]
+        for content in broken:
+            with open(self.path, "w", encoding="utf-8") as fp:
+                fp.write(content)
+            try:
+                user = UserModel(self.path)
+            except Exception as exc:          # noqa: BLE001
+                self.fail("load() 遇到 %r 崩了：%s: %s"
+                          % (content[:40], type(exc).__name__, exc))
+            self.assertEqual(user.words, {}, content)
+            self.assertEqual(user.bigrams, {}, content)
+
+    def test_load_keeps_good_records_drops_bad_ones(self):
+        """部分损坏时**逐条丢弃、保留好的**，而不是整个文件不要。
+
+        丢一条词频只是少一次排序提示；丢掉整个文件是用户攒了几个月的学习
+        成果全没了。
+        """
+        with open(self.path, "w", encoding="utf-8") as fp:
+            fp.write('{"version":1,"words":{"你好":5,"坏":"x","零":0,'
+                     '"负":-3},"bigrams":{"a|b":2,"c|d":null}}')
+        user = UserModel(self.path)
+        self.assertEqual(user.words, {"你好": 5})
+        self.assertEqual(user.bigrams, {"a|b": 2})
+
+    def test_forget_actually_persists(self):
+        """``forget()`` 必须真的落盘。
+
+        ``flush()`` 有 ``_dirty`` 门（没脏就不写，省磁盘），而 ``clear()``
+        不改 ``_dirty`` ——所以原样调 ``flush()`` **什么都不会写盘**，清空只
+        存在于内存里，重启就回来了。
+        """
+        import json as _json
+        user = UserModel(self.path)
+        user.learn("程序员", "写一个")
+        user.flush()
+        self.assertTrue(_json.loads(open(self.path, encoding="utf-8").read())["words"])
+
+        UserModel(self.path).forget()
+        disk = _json.loads(open(self.path, encoding="utf-8").read())
+        self.assertEqual(disk["words"], {}, "forget() 没落盘，重启就回来了")
+        self.assertEqual(disk["bigrams"], {})
+
     def test_learn_and_reload(self):
         user = UserModel(self.path)
         user.learn("程序员", "写一个")
@@ -3037,6 +3103,161 @@ class DomainIndexMatchKindTest(unittest.TestCase):
         self.assertEqual(got2.get("通货膨胀"), "init",
                          "首字母完整输入应标 init")
 
+
+
+class DigitKeyBoundsTest(unittest.TestCase):
+    """数字键映射必须跟着**当页实际候选数**走。
+
+    每页候选数可配 5 / 7 / 9（``PAGE_SIZE_CHOICES``），而 ``_digit_index``
+    原来写死「1..9 → 0..8、0 → 9」。于是 ``page_size=5`` 时按 6/7/8/9 全部
+    越界，而 ``select()`` 的边界检查是**静默 return** ——那 4 个键变成
+    「按了没反应」的死键。改候选数是常规操作，所以这个很容易撞上。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def make(self, page_size):
+        cfg = os.path.join(self.tmp, "c%d.json" % page_size)
+        with open(cfg, "w", encoding="utf-8") as fp:
+            json.dump({"page_size": page_size}, fp)
+        engine, _, _ = make_engine(os.path.join(self.tmp, "u%d.json" % page_size),
+                                   cfg)
+        engine.on_focus_in()
+        return engine
+
+    def _type_cxy(self, engine):
+        for ch in "cxy":
+            engine.process_key(ord(ch))
+        return engine
+
+    def test_every_digit_selects_something(self):
+        """当页有几个候选，按 1..当页数 就要都能选中。"""
+        for page_size in (5, 7, 9):
+            engine = self._type_cxy(self.make(page_size))
+            count = len(engine.page_candidates)
+            self.assertEqual(count, page_size)
+            for d in range(1, page_size + 1):
+                engine = self._type_cxy(self.make(page_size))
+                engine.process_key(ord("0") if d == 10 else ord("0") + d)
+                self.assertTrue(
+                    engine._context,
+                    "page_size=%d 按数字 %d 没选中任何候选" % (page_size, d))
+
+    def test_zero_selects_last_item_of_current_page(self):
+        """``0`` 是「收尾键」，映射到**当页最后一项**，不是固定的第 10 项。"""
+        for page_size in (5, 7, 9):
+            engine = self._type_cxy(self.make(page_size))
+            last = engine.page_candidates[-1].text
+            engine.process_key(ord("0"))
+            self.assertEqual(engine._context, last,
+                             "page_size=%d 时按 0 应选中 %r" % (page_size, last))
+
+    def test_out_of_range_digit_is_swallowed_not_passthrough(self):
+        """越界的数字键要**吞掉**，不能透传。
+
+        透传的话会在中文文本里蹦出一个阿拉伯数字，比「按了没反应」更糟。
+        """
+        engine = self._type_cxy(self.make(5))
+        self.assertTrue(engine.process_key(ord("9")), "越界数字键被透传给应用了")
+
+
+class TabSelectIndexTest(unittest.TestCase):
+    """Tab 必须选**页内**下标，不是全局下标。
+
+    原来写的是 ``self.page * self.page_size + 1``——那是全局下标，而
+    ``select()`` 收的是页内下标。第 0 页时全局 1 恰好等于页内 1，**掩盖了
+    错位**；翻到第 1 页后 nxt=10 超出 ``page_candidates``（长度 9），被边界
+    检查静默挡掉，Tab 就成了死键。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def make(self):
+        engine, _, _ = make_engine(os.path.join(self.tmp, "user.json"))
+        engine.on_focus_in()
+        return engine
+
+    def _second_item(self, engine):
+        self.assertGreaterEqual(len(engine.page_candidates), 2)
+        return engine.page_candidates[1].text
+
+    def test_tab_works_after_paging_in_composing(self):
+        for page in (0, 1, 2):
+            engine = self.make()
+            for ch in "cxy":
+                engine.process_key(ord(ch))
+            for _ in range(page):
+                engine.process_key(0xFF56)          # PageDown
+            want = self._second_item(engine)
+            engine.process_key(0xFF09)              # Tab
+            self.assertEqual(
+                engine._context, want,
+                "第 %d 页按 Tab 应选中页内第 2 项 %r，实际 %r"
+                % (page, want, engine._context))
+
+    def test_tab_works_after_paging_in_associate(self):
+        for page in (0, 1, 2):
+            engine = self.make()
+            for ch in "cxy":
+                engine.process_key(ord(ch))
+            engine.process_key(0x3B, 0, 1 << 2)     # Ctrl+; 进入联想
+            for _ in range(page):
+                engine.process_key(0xFF56)
+            want = self._second_item(engine)
+            engine.process_key(0xFF09)
+            self.assertEqual(
+                engine.assoc_context, want,
+                "联想态第 %d 页按 Tab 应选中 %r，实际 %r"
+                % (page, want, engine.assoc_context))
+
+
+class BigramRespectsUserSettingsTest(unittest.TestCase):
+    """二元组加权必须跟着「用户数据」的开关走。
+
+    ``score_with_context`` 原来用硬编码 ``W_BIGRAM_USER``（90000），于是
+    首选项里两个开关对它完全无效。更糟的是 90000 一次就 +9 万分，比语料分
+    的总波动（几千）大一个数量级——只要历史上记过一条二元组，它就压过一切
+    语料信号。所以用户把「我的词频权重」拉到 0（滑块说明写着「0 = 完全按
+    语料排序」）得到的并不是纯语料排序。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def probe(self, cfg, bigram):
+        path = os.path.join(self.tmp, "c.json")
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(cfg, fp)
+        engine, _, _ = make_engine(
+            os.path.join(self.tmp, "u.json"), path)
+        engine.on_focus_in()
+        for ch in "cxy":
+            engine.process_key(ord(ch))
+        if bigram:
+            engine.user.bigrams["陈兴瑜|常见于"] = 1
+        engine._context = "陈兴瑜"
+        engine.refresh()
+        return [c.text for c in engine.candidates[:3]]
+
+    def test_learning_off_disables_bigram_boost(self):
+        off = self.probe({"enable_learning": False}, False)
+        on = self.probe({"enable_learning": False}, True)
+        self.assertEqual(off, on, "关掉「学习我的用词」后二元组仍在生效")
+
+    def test_zero_weight_disables_bigram_boost(self):
+        off = self.probe({"user_freq_weight": 0}, False)
+        on = self.probe({"user_freq_weight": 0}, True)
+        self.assertEqual(
+            off, on,
+            "权重 0 的定义是「完全按语料排序」，二元组不该再生效")
+
+    def test_bigram_boost_scales_with_weight(self):
+        """默认和半档**应该**仍有影响——那是用户数据，不是要关掉的。"""
+        off = self.probe({"user_freq_weight": 60000}, False)
+        on = self.probe({"user_freq_weight": 60000}, True)
+        self.assertNotEqual(off, on, "默认配置下二元组应该生效")
 
 
 class AssociatePassthroughTest(unittest.TestCase):

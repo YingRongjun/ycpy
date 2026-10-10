@@ -210,6 +210,11 @@ class Composer:
         self.user = user
         #: 用户词频的权重，来自首选项；设成 0 相当于关掉用户偏好
         self.user_weight = W_USER
+        #: 「学习我的用词」开关。关掉时单词频会被清空（见 engine 的
+        #: ``apply_user_counts(user.words if config.enable_learning else {})``），
+        #: 但**二元组是另一条路**，引擎那边管不到，所以这里自己记一份，
+        #: 供 ``score_with_context`` 判断。
+        self._learning_enabled = True
         #: 精确命中少于这个数时，才额外去试「猜出来的变体」。
         #: 设成 0 表示永远只走精确匹配，等于关掉容错。
         self.fuzzy_min_exact = FUZZY_MIN_EXACT
@@ -900,8 +905,26 @@ class Composer:
         """按已上屏的上下文重排。原地修改。"""
         if not context:
             return
+        # 二元组是**用户数据**，所以它的权重必须跟着用户词频权重走。
+        #
+        # 原来这里写的是硬编码 ``W_BIGRAM_USER``（90000），于是首选项里的两个
+        # 开关对它完全无效：
+        #
+        # * ``enable_learning=False``（「关闭后退化为纯语料排序」）-> 仍生效；
+        # * ``user_freq_weight=0``（滑块说明写着「0 = 完全按语料排序」）-> 仍生效。
+        #
+        # 而且后果比「开关失灵」更严重：90000 一次就 +9 万分，比语料分的总
+        # 波动（几千）大一个数量级，所以**只要历史上记过一条二元组，它就压过
+        # 一切语料信号**。用户把权重拉到 0 得到的并不是纯语料排序。
+        #
+        # 换算按比例而不是直接用 user_weight：二元组是「上下文 -> 后继词」的
+        # 强信号，值得比单词频更高（原来 90000 vs 60000，比例 1.5），但不该
+        # 脱离用户对「用户数据占多大分量」的判断。
+        if self.user_weight <= 0 or not self._learning_enabled:
+            return
+        weight = W_BIGRAM_USER * (self.user_weight / W_USER)
         for cand in candidates:
-            cand.score += W_BIGRAM_USER * self.user.bigram_count(context, cand.text)
+            cand.score += weight * self.user.bigram_count(context, cand.text)
         candidates.sort(key=lambda c: -c.score)
 
     def apply_user_counts(self, counts: dict[str, int]) -> None:

@@ -84,6 +84,10 @@ MOD1_MASK = 1 << 3
 #: GTK 等客户端会把松开也送进 ProcessKeyEvent；不区分就会一个键打两个字符。
 IBUS_RELEASE_MASK = 1 << 30
 
+#: ``Tab`` 选当前页的第几项。README 约定 Tab = 「选下一个候选」，
+#: 也就是空格选中的那一项（页内下标 0）之后的第 1 项。
+TAB_SELECT_INDEX = 1
+
 #: 挂在 GNOME 输入法菜单里的「首选项」入口所用的 property key
 PROP_PREFERENCES = "preferences"
 
@@ -327,10 +331,6 @@ class EngineObject(dbus.service.Object):
         pass
 
     @dbus.service.method(proto.IFACE_ENGINE, in_signature="s", out_signature="")
-    def PropertyShow(self, name):  # noqa: N802
-        pass
-
-    @dbus.service.method(proto.IFACE_ENGINE, in_signature="s", out_signature="")
     def PropertyHide(self, name):  # noqa: N802
         pass
 
@@ -414,6 +414,9 @@ class PinyinEngine:
         self.ui = ui  # EngineObject 或测试替身
         self.config = config or Config()
         self.composer.user_weight = self.config.user_freq_weight
+        # 二元组加权不走单词频那条路（引擎那边只清 words），得单独同步，
+        # 否则「关闭学习」时二元组仍在生效。
+        self.composer._learning_enabled = self.config.enable_learning
         self.composer.fuzzy_min_exact = self.config.fuzzy_min_exact
 
         self.state = ST_IDLE
@@ -461,6 +464,8 @@ class PinyinEngine:
         """首选项对话框改完配置后，下一次按键就生效，不用重启输入法。"""
         if self.config.reload_if_changed():
             self.composer.user_weight = self.config.user_freq_weight
+            # 见 __init__ 里的同名赋值：二元组要单独跟着开关走。
+            self.composer._learning_enabled = self.config.enable_learning
             self.composer.fuzzy_min_exact = self.config.fuzzy_min_exact
             # 领域词库跟着配置即时生效。独立索引架构的好处就在这里：
             # 载入/丢弃只是加减一个索引对象（每个领域 ~25 ms），
@@ -671,12 +676,31 @@ class PinyinEngine:
     # ------------------------------------------------------------ 按键分派
 
     @staticmethod
-    def _digit_index(keyval: int) -> int:
-        """1..9 → 0..8，0 → 9，非数字返回 -1。"""
-        if 0x31 <= keyval <= 0x39:
-            return keyval - 0x31
-        if keyval == 0x30:
-            return 9
+    def _is_digit(keyval: int) -> bool:
+        """是不是主键盘/小键盘的数字键（与「能否选中」无关）。"""
+        return 0x30 <= keyval <= 0x39
+
+    def _digit_index(self, keyval: int) -> int:
+        """数字键 → **页内**下标，非数字返回 -1。
+
+        映射必须跟着当页的**实际候选数**走，不能写死「1..9 → 0..8、0 → 9」：
+        每页候选数可配5 / 7 / 9（``PAGE_SIZE_CHOICES``），写死的话
+        ``page_size=5`` 时按 6/7/8/9/0 全都越界，而 ``select()`` 的边界检查
+        是**静默 return** ——于是那 5 个键变成「按了没反应」的死键。
+
+        实测：``page_size=5`` 时按 1~5 正常，按 6~0 全部无效。
+
+        所以这里按 ``len(page_candidates)`` 折算，越界就返回 -1（调用方据此
+        区分「不是数字键」和「数字键越界」）。
+        """
+        count = len(self.page_candidates)
+        if 0x31 <= keyval <= 0x39:            # 1..9
+            idx = keyval - 0x31
+        elif keyval == 0x30:                  # 0 收尾
+            idx = count - 1
+        else:
+            return -1
+        return idx if idx < count else -1
         return -1
 
     def _handle_punctuation(self, keyval: int, modifier: int = 0) -> bool:
@@ -716,11 +740,23 @@ class PinyinEngine:
             self.raw_keys += chr(keyval)
             self.refresh()
             return True
-        idx = self._digit_index(keyval)
-        if idx >= 0:
-            self.select(idx)
+        if self._is_digit(keyval):
+            idx = self._digit_index(keyval)
+            if idx >= 0:
+                self.select(idx)
+            # 越界也吞掉：中文态下数字键是输入法自己的键，放给应用会在
+            # 中文文本里蹦出一个阿拉伯数字，比「按了没反应」更糟。
             return True
         if keyval == KEY_SPACE:
+            # 候选为空时放给应用：用户按空格就是想打一个空格。
+            #
+            # ``select`` 对越界是**静默 return**，原来这里一律
+            # ``return True``，于是这个按键被吞掉、什么也没发生。
+            # 候选池为空是真实存在的（打分会剔掉繁体单字、联想末字查不到
+            # 搭配时 next_words 返回空），只是被「打不出拼音给高频词兜底」
+            # 挡着、极少出现——所以之前一直没被发现。
+            if not self.page_candidates:
+                return False
             self.select(0)
             return True
         if keyval in (KEY_RETURN, KEY_KP_ENTER):
@@ -761,24 +797,46 @@ class PinyinEngine:
             self.turn_page(-1)
             return True
         if keyval == KEY_TAB:
-            nxt = self.page * self.page_size + 1
-            if self.candidates:
-                self.select(min(nxt, len(self.candidates) - 1))
+            # Tab = 「选下一个候选」，即当前页的第 2 项（页内下标 1）。
+            #
+            # 这里原来写的是 ``self.page * self.page_size + 1``——那是**全局**
+            # 下标，而 ``select`` 收的是**页内**下标。第 0 页时全局 1 恰好
+            # 等于页内 1，**掩盖了错位**；翻到第 1 页后 nxt=10 超出
+            # page_candidates（长度 9），被 select 开头的边界检查静默挡掉，
+            # Tab 就成了一个什么都不做的死键。实测第 1、2 页都是。
+            self.select(TAB_SELECT_INDEX)
             return True
         return False
 
     def _handle_associate(self, keyval: int) -> bool:
-        idx = self._digit_index(keyval)
-        if idx >= 0:
-            self.select(idx)
+        if self._is_digit(keyval):
+            idx = self._digit_index(keyval)
+            if idx >= 0:
+                self.select(idx)
+            # 越界也吞掉：中文态下数字键是输入法自己的键，放给应用会在
+            # 中文文本里蹦出一个阿拉伯数字，比「按了没反应」更糟。
             return True
         if keyval == KEY_SPACE:
+            # 候选为空时放给应用：用户按空格就是想打一个空格。
+            #
+            # ``select`` 对越界是**静默 return**，原来这里一律
+            # ``return True``，于是这个按键被吞掉、什么也没发生。
+            # 候选池为空是真实存在的（打分会剔掉繁体单字、联想末字查不到
+            # 搭配时 next_words 返回空），只是被「打不出拼音给高频词兜底」
+            # 挡着、极少出现——所以之前一直没被发现。
+            if not self.page_candidates:
+                return False
             self.select(0)
             return True
         if keyval == KEY_TAB:
-            nxt = self.page * self.page_size + 1
-            if self.assoc_candidates:
-                self.select(min(nxt, len(self.assoc_candidates) - 1))
+            # Tab = 「选下一个候选」，即当前页的第 2 项（页内下标 1）。
+            #
+            # 这里原来写的是 ``self.page * self.page_size + 1``——那是**全局**
+            # 下标，而 ``select`` 收的是**页内**下标。第 0 页时全局 1 恰好
+            # 等于页内 1，**掩盖了错位**；翻到第 1 页后 nxt=10 超出
+            # page_candidates（长度 9），被 select 开头的边界检查静默挡掉，
+            # Tab 就成了一个什么都不做的死键。实测第 1、2 页都是。
+            self.select(TAB_SELECT_INDEX)
             return True
         if keyval in (KEY_PAGE_DOWN, KEY_DOWN, KEY_MINUS, KEY_COMMA):
             self.turn_page(1)
