@@ -49,6 +49,10 @@ config.json
 /tmp/
 *.jsonl
 
+# agent 工具的工作记忆（不属于项目产物）
+.qingniao/
+.aider*
+
 # 编辑器
 .vscode/
 .idea/

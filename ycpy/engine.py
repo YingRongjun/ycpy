@@ -84,7 +84,7 @@ MOD1_MASK = 1 << 3
 #: GTK 等客户端会把松开也送进 ProcessKeyEvent；不区分就会一个键打两个字符。
 IBUS_RELEASE_MASK = 1 << 30
 
-#: ``Tab`` 选当前页的第几项。README 约定 Tab = 「选下一个候选」，
+#: ``Tab`` 选当前页的第几项。约定是 Tab = 「选下一个候选」，
 #: 也就是空格选中的那一项（页内下标 0）之后的第 1 项。
 TAB_SELECT_INDEX = 1
 
