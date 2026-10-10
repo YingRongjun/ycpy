@@ -646,6 +646,52 @@ self._press_consumed = {k: v for k, v in self._press_consumed.items() if not v}
 `True` 的那些应用从头到尾没看见过，清掉或留着都无所谓；`False` 的留着，抬起才能
 回放 `False`、和 press 配成完整的一对。
 
+### 清理记录表的**每一处**都要单独审
+
+上面那条规则在代码里出现了**两次**，而修好一处不等于全部修好。
+
+第二处是容量超限的兜底分支（`_PRESS_CONSUMED_MAX = 512`），它原来也写的是
+`clear()`：
+
+```python
+if len(self._press_consumed) > _PRESS_CONSUMED_MAX:
+    self._press_consumed.clear()          # ← 同一个错误
+```
+
+触发条件是「记录表攒到 512 条」，而泄漏的记录恰恰**全是 `False`**（透传的键，
+因为引擎吃掉的键总会正常收到抬起）。所以这个分支要真的触发并不容易，用户报的是
+「偶尔还是会遇到连续输出」——**修好 `on_focus_out` 之后它一直躲在后面**。
+
+而它又不是纯粹的想象：改成只清 `True` 之后，原先那个「release 全丢也不能无界
+增长」的测试立刻变红（712 条 > 513），因为**只有 `True` 会被清掉，`False` 全留下**。
+
+这里有个取舍很容易搞反：
+
+| | 代价 |
+|---|---|
+| 丢掉 `False` 记录 | 抬起回放成 `True` → 客户端只收 press 不收 release → **自动重复**（用户可见）|
+| 保留 `False` 记录 | release 真丢了就多留一个条目 → 只是内存 |
+
+**泄漏远好于丢失。** 所以收缩逻辑（`_trim_press_records`）有优先级：先丢 `True`
+（应用从没见过，丢掉完全无害），不够再丢最旧的 `False`：
+
+```python
+while len(rec) > _PRESS_CONSUMED_MAX:
+    victim = next((k for k, v in rec.items() if v), None)
+    if victim is None:
+        victim = next(iter(rec))        # 全是透传记录：丢最旧的
+    rec.pop(victim, None)
+```
+
+> **教训**：「我想顺手限制一下增长」不能写成 `clear()`。清理记录表的每一处都得
+> 单独审，因为同一个错误可以在多个地方各写一遍，而它们的触发频率差别很大——
+> 频繁的那个先被复现、难复现的那个就藏住了。
+>
+> 回归测试 `test_no_cleanup_site_drops_passthrough_records` 用源码级断言把这条
+> 钉死：所有重建记录表的地方都必须带 `if not v` 过滤，且代码里不得出现裸
+> `clear()`。以后新加清理点会直接被它拦下，而不是等某个具体的键在某个状态下
+> 出问题才发现。
+
 ### 热键匹配必须忽略锁定状态位
 
 客户端上报的 modifier 里**总是带着锁定键的当前状态**：NumLock、CapsLock、

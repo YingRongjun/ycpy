@@ -71,6 +71,11 @@ KEY_SHIFT_R = 0xFFE2
 
 #: ``_press_consumed`` 的容量上限。正常情况下每条都会被对应的抬起 pop 掉，
 #: 不会涨到这儿；这只是防止 release 丢失时无界增长的兜底。
+#: **超限时不能 ``clear()``**——那会把透传给应用的记录一起抹掉，它们的抬起
+#: 于是回放成 True，客户端只收到 press、收不到 release，开始自动重复。
+#: 与 ``on_focus_out`` 同一个约束：只清 ``True``（引擎吃掉的），
+#: ``False``（透传的）必须留到抬起把它 pop 掉。收缩逻辑见
+#: ``_trim_press_records``。
 _PRESS_CONSUMED_MAX = 512
 
 CONTROL_MASK = 1 << 2
@@ -792,6 +797,8 @@ class PinyinEngine:
         # 松开事件：ibus 用 modifier 的第 30 位标记它。松开本身不产生任何动作，
         # 但必须**回放按下时的结论**，否则客户端会只收到按下、收不到松开。
         if modifier & IBUS_RELEASE_MASK:
+            _trace("release keyval=%#x 记录=%s"
+                   % (keyval, self._press_consumed.get(keyval, "<无>")))
             # 回放**这个键自己**按下时的结论，不是「最后一个被按下的键」的。
             # pop 掉是因为一次 press/release 只配对一次；没有配对的抬起
             # （比如 ibus 送来的杂散 release）拿到 None，按老规矩消费掉。
@@ -818,6 +825,8 @@ class PinyinEngine:
             return True if consumed is None else consumed
 
         handled = self._process_press(keyval, modifier)
+        _trace("press   keyval=%#x mod=%#x -> %s  (state=%s)"
+               % (keyval, modifier, "吃掉" if handled else "透传", self.state))
         # 按下 Shift 之后又按了**任何**别的键（不管引擎处不处理），
         # 都说明 Shift 只是当修饰键用（大写、?、!），取消待切换。
         # 早先只在 handled=True 时才清除，透传的键清不掉，待办会一直留着。
@@ -833,9 +842,36 @@ class PinyinEngine:
         # 空间有限，所以最多也就几百条，这里顺手做个上限兜底，避免异常情况下
         # 无界增长。
         if len(self._press_consumed) > _PRESS_CONSUMED_MAX:
-            self._press_consumed.clear()
+            self._trim_press_records()
         self._press_consumed[keyval] = handled
         return handled
+
+    def _trim_press_records(self) -> None:
+        """记录表超限时的收缩。**丢错的代价远大于泄漏**，所以有优先级。
+
+        这里的取舍很容易搞反：
+
+        * 丢掉 ``False``（透传）的记录 -> 它的抬起 pop 不到 -> 兜底返回
+          ``True`` -> 客户端只收到 press、收不到 release -> **开始自动重复**。
+          这是用户能看见的 bug。
+        * 保留 ``False`` 的记录 -> 万一 release 真丢了，就多留一个条目，
+          只是内存。keyval 取值空间有限，实际到不了多少。
+
+        所以**先丢 ``True``**（引擎吃掉的，应用从头到尾没看见，抬起回放什么
+        它都感知不到，丢掉完全无害）；不够再丢最旧的 ``False``。
+
+        注意这里原来写的是 ``clear()``——和 ``on_focus_out`` 犯的是同一个
+        错误，只是触发条件不同（那边频繁、这边要攒到 512 条才出现），
+        所以修好前一个之后它一直躲在后面。
+        """
+        rec = self._press_consumed
+        # dict 保持插入序，从头开始就是最旧的。
+        while len(rec) > _PRESS_CONSUMED_MAX:
+            victim = next((k for k, v in rec.items() if v), None)
+            if victim is None:
+                # 全是透传记录：只能丢最旧的那个。
+                victim = next(iter(rec))
+            rec.pop(victim, None)
 
     def _process_press(self, keyval: int, modifier: int = 0) -> bool:
         """处理一次真正的按下，返回是否由引擎消费。"""

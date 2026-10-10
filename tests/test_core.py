@@ -1971,6 +1971,71 @@ class StalePressRecordTest(unittest.TestCase):
                              "press 与 release 的结论必须一致，"
                              "客户端才收得到完整的一对")
 
+    def test_capacity_overflow_keeps_passthrough_records(self):
+        """**记录表超限时也不能全清**——同一个错误，换了个触发条件。
+
+        ``_PRESS_CONSUMED_MAX`` 那个分支原来写的是 ``clear()``，和
+        ``on_focus_out`` 犯的是同一个错：把透传给应用的记录一起抹了。
+        于是透传键的抬起 pop 不到 -> 兜底返回 True -> 客户端只收到 press、
+        收不到 release -> 自动重复（用户报「偶尔还是会遇到连续输出」）。
+
+        两个触发条件的区别值得记下来：``on_focus_out`` 是频繁发生的那个，
+        容量溢出要攒到 512 条才触发、极难复现——所以修好前一个之后，
+        后一个会一直躲在后面。**结论是：清理记录表的每一处都得单独审，
+        「我想限制一下增长」不能顺手写成 clear()。**
+        """
+        engine = self.make()
+        # 灌满记录表，逼出容量超限分支。
+        from ycpy.engine import _PRESS_CONSUMED_MAX
+        for kv in range(0x1000, 0x1000 + _PRESS_CONSUMED_MAX + 10):
+            engine._press_consumed[kv] = True
+
+        # 再按一个**透传**的键（英文态下所有键都透传），然后抬起。
+        engine.state = ST_ENGLISH
+        keyval = ord("a")
+        press_ret = engine.process_key(keyval, 0, 0)
+        self.assertFalse(press_ret, "英文态下应透传给应用")
+        # 这一步会触发容量检查——正是它以前把刚记下的透传记录抹掉的地方。
+        release_ret = engine.process_key(keyval, 0, 1 << 30)
+        self.assertEqual(press_ret, release_ret,
+                         "超限清理吃掉了透传记录，抬起配不上对")
+
+    def test_no_cleanup_site_drops_passthrough_records(self):
+        """通用不变量：**任何**重建记录表的地方都不能丢透传记录。
+
+        比逐个断言「容量溢出时 X 键的 press/release 要一致」更根本——
+        以后新加清理点时这条会直接指出它违反了约束，而不是等某个具体的键
+        在某个状态下出问题才发现。
+
+        这类 bug 的教训：同一个错误可以在多个地方各写一遍，修好一处不代表
+        全部修好。这里用源码级的断言把「每一处重建都得过滤掉 True」钉死。
+        """
+        import inspect
+        import re
+        import ycpy.engine as engine_mod
+
+        cls = type(self.make())
+        src = inspect.getsource(cls)
+        rebuilds = re.findall(r"self\._press_consumed\s*=\s*\{[^{}]*?\}",
+                              src, re.S)
+        self.assertGreaterEqual(
+            len(rebuilds), 1,
+            "至少 on_focus_out 那一处重建；实现变了请同步更新")
+        for expr in rebuilds:
+            self.assertIn(
+                "if not v", expr,
+                "重建记录表时必须保留透传记录（False）：%r" % expr)
+        # 反向断言：**代码里**不能有裸 clear()（注释里提到它是为了记录历史，
+        # 所以要排除注释行）。收缩要交给 _trim_press_records，
+        # 它才有「先丢 True、丢了无害」的优先级逻辑。
+        code_lines = [ln for ln in src.splitlines()
+                      if "_press_consumed.clear()" in ln
+                      and not ln.lstrip().startswith("#")]
+        self.assertEqual(
+            code_lines, [],
+            "裸 clear() 会吃掉透传记录，必须走 _trim_press_records")
+
+
     def test_press_release_paired_under_focus_race(self):
         """焦点竞态：press 与 release 之间发生 FocusOut，仍要成对。"""
         for keyval in (KEY_BACKSPACE, KEY_RETURN, ord("a")):
