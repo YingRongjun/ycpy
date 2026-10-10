@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 import time
@@ -41,6 +42,21 @@ def _int_dict(raw) -> dict[str, int]:
         # bool 是 int 的子类，但 True 不该被当成 1 次。
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
+        # **必须显式排除 NaN / ±Infinity。** 上面那行 isinstance 只挡了
+        # 非数字类型，这三个都是 float，都能通过——然后在 int() 上炸：
+        #
+        #   NaN       -> ValueError: cannot convert float NaN to integer
+        #   Infinity  -> OverflowError: cannot convert float infinity to integer
+        #   1e309     -> JSON 解析时就是 inf，同上
+        #
+        # 而 ``value <= 0`` 挡不住它们：**NaN 的任何比较都是 False**，
+        # 所以它直接绕过那道过滤坠到 int() 上。这是上一版漏掉的——我在这里
+        # 写着「绝不能抛异常」，却只测了 5 种坏输入，浮点特殊值没覆盖到。
+        #
+        # 用 math.isfinite 而不是 ``value == value``（NaN 自反为假）那种写法：
+        # 前者顺带把 ±Infinity 一起挡掉，且意图直白。
+        if isinstance(value, float) and not math.isfinite(value):
+            continue
         if value <= 0:
             continue
         out[key] = int(value)
@@ -57,6 +73,9 @@ class UserModel:
         self.bigrams: dict[str, int] = {}
         self._dirty = 0
         self._last_save = 0.0
+        #: 磁盘上的文件不是本程序写的（version 不是 1）时置位，此后不再回写，
+        #: 避免用空数据覆盖用户在新版机器上攒的词频。见 ``load``。
+        self._read_only = False
         self.load()
 
     # ---------------------------------------------------------------- 持久化
@@ -80,13 +99,24 @@ class UserModel:
                 data = json.load(fp)
         except (OSError, ValueError):
             return
+        # 版本不是 1 时**标记为只读**，不再往回写。
+        #
+        # 原来的行为是「认不出来就当空文件」，可第一次 ``flush()`` 就会把
+        # 用户的词频整个覆盖掉：用户从装了新版的机器回到旧版（或者手改了
+        # version 字段），攒了几个月的学习成果就在下一次选词时没了，而且
+        # **没有任何提示**——旧版读不出新版的数据本来就正常，静默覆盖才是
+        # 不可接受的那一半。
+        #
+        # 只读状态下 learn() 仍可在内存里工作，但 flush() 直接返回，所以
+        # 旧文件原封不动。
         if not isinstance(data, dict) or data.get("version") != 1:
+            self._read_only = True
             return
         self.words = _int_dict(data.get("words"))
         self.bigrams = _int_dict(data.get("bigrams"))
 
     def flush(self) -> None:
-        if not self._dirty:
+        if not self._dirty or self._read_only:
             return
         directory = os.path.dirname(self.path)
         os.makedirs(directory, exist_ok=True)

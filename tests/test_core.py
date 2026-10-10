@@ -208,6 +208,20 @@ class UserModelTest(unittest.TestCase):
             '"hello"',
             '{"version":1,"words":[1,2]}',
             "",
+            # 浮点特殊值。``isinstance(x, float)`` 挡不住它们（NaN 和
+            # Infinity 都是 float），而 ``value <= 0`` 也挡不住 NaN——
+            # **NaN 的任何比较都是 False**，它直接绕过过滤坠到 int() 上：
+            #   NaN      -> ValueError: cannot convert float NaN to integer
+            #   Infinity -> OverflowError: cannot convert float infinity to integer
+            # 1e309 在 JSON 解析阶段就已经是 inf。
+            #
+            # 这三种是上一版漏掉的：我在 docstring 里写着「绝不能抛异常」，
+            # 却只测了 5 种坏输入。
+            '{"version":1,"words":{"你好":NaN}}',
+            '{"version":1,"words":{"你好":Infinity}}',
+            '{"version":1,"words":{"你好":-Infinity}}',
+            '{"version":1,"words":{"你好":1e309}}',
+            '{"version":1,"bigrams":{"a|b":NaN}}',
         ]
         for content in broken:
             with open(self.path, "w", encoding="utf-8") as fp:
@@ -219,6 +233,35 @@ class UserModelTest(unittest.TestCase):
                           % (content[:40], type(exc).__name__, exc))
             self.assertEqual(user.words, {}, content)
             self.assertEqual(user.bigrams, {}, content)
+
+    def test_load_drops_nan_and_infinity_but_keeps_good(self):
+        """NaN / Infinity 这类浮点特殊值要丢弃，且**不能带走好记录**。"""
+        with open(self.path, "w", encoding="utf-8") as fp:
+            fp.write('{"version":1,"words":{"好":5,"坏":NaN,"炸":1e309},'
+                     '"bigrams":{"a|b":2,"c|d":Infinity}}')
+        user = UserModel(self.path)
+        self.assertEqual(user.words, {"好": 5})
+        self.assertEqual(user.bigrams, {"a|b": 2})
+
+    def test_future_version_is_never_overwritten(self):
+        """版本不是 1 的文件**不能被回写覆盖**。
+
+        用户从装了新版的机器回到旧版（或手改了 version 字段），攒了几个月的
+        词频会在下一次选词时被空数据整个覆盖掉，而且没有任何提示。旧版读不
+        出新版的数据本来就正常，静默覆盖才是不可接受的那一半。
+        """
+        with open(self.path, "w", encoding="utf-8") as fp:
+            fp.write('{"version":99,"words":{"你好":9}}')
+        user = UserModel(self.path)
+        self.assertEqual(user.words, {}, "认不出来的版本就该当空")
+        self.assertTrue(user._read_only, "认不出来的版本必须标记为只读")
+
+        user.learn("程序员")
+        user.flush()
+        with open(self.path, encoding="utf-8") as fp:
+            disk = json.load(fp)
+        self.assertEqual(disk["version"], 99, "版本号被改写了")
+        self.assertEqual(disk["words"], {"你好": 9}, "用户在新版攒的词频被覆盖了")
 
     def test_load_keeps_good_records_drops_bad_ones(self):
         """部分损坏时**逐条丢弃、保留好的**，而不是整个文件不要。
@@ -244,10 +287,12 @@ class UserModelTest(unittest.TestCase):
         user = UserModel(self.path)
         user.learn("程序员", "写一个")
         user.flush()
-        self.assertTrue(_json.loads(open(self.path, encoding="utf-8").read())["words"])
+        with open(self.path, encoding="utf-8") as fp:
+            self.assertTrue(_json.load(fp)["words"])
 
         UserModel(self.path).forget()
-        disk = _json.loads(open(self.path, encoding="utf-8").read())
+        with open(self.path, encoding="utf-8") as fp:
+            disk = _json.load(fp)
         self.assertEqual(disk["words"], {}, "forget() 没落盘，重启就回来了")
         self.assertEqual(disk["bigrams"], {})
 
@@ -3246,6 +3291,64 @@ class TabSelectIndexTest(unittest.TestCase):
                 "联想态第 %d 页按 Tab 应选中 %r，实际 %r"
                 % (page, want, engine.assoc_context))
 
+    def test_tab_and_space_share_one_out_of_range_policy(self):
+        """Tab 与空格对「越界」必须有**同一个口径**：都透传，都不吞。
+
+        之前是各自 ``self.select(...)`` + 无脑 ``return True``，于是某个键
+        越界时 ``select`` 静默挡掉、按键却被吞掉——「按了没反应」的死键。
+
+        注意 1 项时两者**本来就该不同**：Tab 是「选下一个」（页内下标 1，
+        1 项时越界），空格是「选第一个」（下标 0，1 项时合法）。所以断言
+        要按各自的应有行为写，不能笼统地要求两者一致。
+        """
+        class _Item:
+            def __init__(self, text):
+                self.text = text
+
+        def run(keyval, count, tag):
+            engine, _, _ = make_engine(
+                os.path.join(self.tmp, "u_%s_%d.json" % (tag, count)))
+            engine.on_focus_in()
+            engine.state = ST_COMPOSING
+            engine.buffer = engine.raw_keys = "cxy"
+            engine.candidates = []
+            engine.page_candidates = [_Item("项%d" % i) for i in range(count)]
+            return bool(engine.process_key(keyval))
+
+        # 空池：两个键都该透传（拿不到结果就别吞掉按键）。
+        self.assertFalse(run(0xFF09, 0, "tab"), "空池按 Tab 被吞掉了")
+        self.assertFalse(run(0x20, 0, "spc"), "空池按空格被吞掉了")
+
+        # 1 项：空格选第 1 项（合法），Tab 想选第 2 项（越界 -> 透传）。
+        self.assertTrue(run(0x20, 1, "spc1"), "1 项时空格应选中第 1 项")
+        self.assertFalse(run(0xFF09, 1, "tab1"), "1 项时按 Tab 应透传而非死键")
+
+        # 2 项：两个键都有得选，都该吃掉。
+        self.assertTrue(run(0x20, 2, "spc2"))
+        self.assertTrue(run(0xFF09, 2, "tab2"))
+
+    def test_tab_out_of_range_exits_associate(self):
+        """联想态按 Tab 越界时，联想窗必须正常关闭。
+
+        ``_handle_associate`` 末尾的 ``exit_associate()`` 在中途 ``return``
+        的分支上走不到，所以越界那条要显式退出，否则残留一个空联想窗。
+        """
+        class _Item:
+            def __init__(self, text):
+                self.text = text
+
+        engine, _, _ = make_engine(os.path.join(self.tmp, "u_assoc.json"))
+        engine.on_focus_in()
+        for ch in "cxy":
+            engine.process_key(ord(ch))
+        engine.process_key(0x3B, 0, 1 << 2)          # Ctrl+; 进入联想
+        self.assertEqual(engine.state, ST_ASSOCIATE)
+        engine.assoc_candidates = [_Item("唯一")]
+        engine.page_candidates = [_Item("唯一")]      # 只有 1 项，Tab 越界
+        engine.process_key(0xFF09)
+        self.assertNotEqual(engine.state, ST_ASSOCIATE,
+                            "越界后残留了空的联想窗")
+
 
 class BigramRespectsUserSettingsTest(unittest.TestCase):
     """二元组加权必须跟着「用户数据」的开关走。
@@ -3279,6 +3382,56 @@ class BigramRespectsUserSettingsTest(unittest.TestCase):
         off = self.probe({"enable_learning": False}, False)
         on = self.probe({"enable_learning": False}, True)
         self.assertEqual(off, on, "关掉「学习我的用词」后二元组仍在生效")
+
+    def _assoc_probe(self, cfg, seed):
+        """联想层的第一档信号（用户历史）有没有被用户数据影响。"""
+        path = os.path.join(self.tmp, "a.json")
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(cfg, fp)
+        engine, _, _ = make_engine(os.path.join(self.tmp, "au.json"), path)
+        engine.on_focus_in()
+        if seed:
+            engine.user.words["程序员"] = 5
+            engine.user.bigrams["陈兴瑜|程序员"] = 1
+        return [(c.text, c.score) for c in engine.composer.next_words("陈兴瑜")[:2]]
+
+    def test_learning_off_disables_associate_user_history(self):
+        """关掉学习后，联想第一档（用户历史）必须消失。
+
+        ``next_words`` 原来是 ``TIER_USER + count``——300 万的硬编码绝对值，
+        完全不看配置。上一次修「关学习」只接了 ``score_with_context`` 一处，
+        这里和整句切分都漏了。实测关掉之后 top 恒为 3,000,001。
+        """
+        for cfg in ({"enable_learning": False}, {"user_freq_weight": 0}):
+            off = self._assoc_probe(cfg, False)
+            on = self._assoc_probe(cfg, True)
+            self.assertEqual(
+                off, on,
+                "配置 %s 下联想层仍受用户历史影响" % cfg)
+
+    def _segment_probe(self, cfg, seed):
+        path = os.path.join(self.tmp, "s.json")
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(cfg, fp)
+        engine, _, _ = make_engine(os.path.join(self.tmp, "su.json"), path)
+        engine.on_focus_in()
+        if seed:
+            engine.user.words["大家一起"] = 5
+        return [(c.text, c.score)
+                for c in engine.composer.candidates("dajiayiqi")[:2]]
+
+    def test_learning_off_disables_segment_user_signal(self):
+        """关掉学习后，整句切分里的用户信号必须归零。
+
+        这两处用的是 ``self.user_weight``，所以权重为 0 时自动归零；但
+        **「关闭学习」只清了单词频、没有动 user_weight**，于是关掉之后
+        「学过一整串」照样加 18000（60000 × 0.15 × 2）。
+        """
+        for cfg in ({"enable_learning": False}, {"user_freq_weight": 0}):
+            off = self._segment_probe(cfg, False)
+            on = self._segment_probe(cfg, True)
+            self.assertEqual(
+                off, on, "配置 %s 下整句切分仍受用户词频影响" % cfg)
 
     def test_zero_weight_disables_bigram_boost(self):
         off = self.probe({"user_freq_weight": 0}, False)

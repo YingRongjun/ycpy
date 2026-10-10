@@ -416,7 +416,7 @@ class PinyinEngine:
         self.composer.user_weight = self.config.user_freq_weight
         # 二元组加权不走单词频那条路（引擎那边只清 words），得单独同步，
         # 否则「关闭学习」时二元组仍在生效。
-        self.composer._learning_enabled = self.config.enable_learning
+        self.composer.learning_enabled = self.config.enable_learning
         self.composer.fuzzy_min_exact = self.config.fuzzy_min_exact
 
         self.state = ST_IDLE
@@ -465,7 +465,7 @@ class PinyinEngine:
         if self.config.reload_if_changed():
             self.composer.user_weight = self.config.user_freq_weight
             # 见 __init__ 里的同名赋值：二元组要单独跟着开关走。
-            self.composer._learning_enabled = self.config.enable_learning
+            self.composer.learning_enabled = self.config.enable_learning
             self.composer.fuzzy_min_exact = self.config.fuzzy_min_exact
             # 领域词库跟着配置即时生效。独立索引架构的好处就在这里：
             # 载入/丢弃只是加减一个索引对象（每个领域 ~25 ms），
@@ -616,6 +616,27 @@ class PinyinEngine:
 
     # ---------------------------------------------------------------- 选词
 
+    def _select_at(self, index_in_page: int) -> bool:
+        """按页内下标选词，越界时返回 False（按键透传给应用）。
+
+        空格和 Tab 共用这一个入口，因为它们**该有同一个口径**。
+
+        之前是各自 ``self.select(...)`` + 无脑 ``return True``，于是：
+        候选只有 1 项时，按 Tab 选中那 1 项（正常），但按空格时
+        ``select(0)`` 越界被静默挡掉、按键却被吞掉——**两个键对同一种情况
+        给出不同答案**，Tab 修好了、空格还是死键。
+
+        越界就返回 False：用户在这类键上得不到任何结果，放给应用是唯一说得
+        通的处理（空格尤其重要，用户按空格常常就是想打一个空格）。
+
+        ``select()`` 保留原样——它对外承诺「越界静默忽略」，改签名会牵动
+        所有调用点。
+        """
+        if index_in_page < 0 or index_in_page >= len(self.page_candidates):
+            return False
+        self.select(index_in_page)
+        return True
+
     def select(self, index_in_page: int) -> None:
         if index_in_page < 0 or index_in_page >= len(self.page_candidates):
             return
@@ -677,7 +698,12 @@ class PinyinEngine:
 
     @staticmethod
     def _is_digit(keyval: int) -> bool:
-        """是不是主键盘/小键盘的数字键（与「能否选中」无关）。"""
+        """是不是数字键（与「能否选中」无关）。
+
+        **只认主键盘**：``0x30..0x39``。小键盘是 ``0xFFB0..0xFFB9``
+        （KP_0..KP_9），这里不认——中文态下小键盘的数字不参与选词，
+        与其静默被吃掉不如原样透传给应用。
+        """
         return 0x30 <= keyval <= 0x39
 
     def _digit_index(self, keyval: int) -> int:
@@ -701,7 +727,6 @@ class PinyinEngine:
         else:
             return -1
         return idx if idx < count else -1
-        return -1
 
     def _handle_punctuation(self, keyval: int, modifier: int = 0) -> bool:
         """英文标点转中文标点。返回 True 表示这个键已被当作标点吃掉。
@@ -748,17 +773,16 @@ class PinyinEngine:
             # 中文文本里蹦出一个阿拉伯数字，比「按了没反应」更糟。
             return True
         if keyval == KEY_SPACE:
-            # 候选为空时放给应用：用户按空格就是想打一个空格。
+            # 越界时放给应用：用户按空格就是想打一个空格。
             #
-            # ``select`` 对越界是**静默 return**，原来这里一律
-            # ``return True``，于是这个按键被吞掉、什么也没发生。
-            # 候选池为空是真实存在的（打分会剔掉繁体单字、联想末字查不到
-            # 搭配时 next_words 返回空），只是被「打不出拼音给高频词兜底」
-            # 挡着、极少出现——所以之前一直没被发现。
-            if not self.page_candidates:
-                return False
-            self.select(0)
-            return True
+            # 候选池为空是真实存在的（打分会剔掉繁体单字、联想末字查不到搭配
+            # 时 next_words 返回空），只是被「打不出拼音给高频词兜底」挡着、
+            # 极少出现——所以之前一直没被发现。原来这里一律 return True，
+            # 按键被吞掉、什么也没发生。
+            #
+            # 走 ``_select_at`` 而不是自己判空，是为了和 Tab 保持同一口径
+            # （那两处曾对同一种情况给出不同答案）。
+            return self._select_at(0)
         if keyval in (KEY_RETURN, KEY_KP_ENTER):
             # 回车 = 原样上屏用户敲的字母，而不是选第一个候选词。
             # 想上屏候选词请用空格（第一个）、数字键或 `;`（上屏并进入联想）。
@@ -804,8 +828,7 @@ class PinyinEngine:
             # 等于页内 1，**掩盖了错位**；翻到第 1 页后 nxt=10 超出
             # page_candidates（长度 9），被 select 开头的边界检查静默挡掉，
             # Tab 就成了一个什么都不做的死键。实测第 1、2 页都是。
-            self.select(TAB_SELECT_INDEX)
-            return True
+            return self._select_at(TAB_SELECT_INDEX)
         return False
 
     def _handle_associate(self, keyval: int) -> bool:
@@ -817,27 +840,20 @@ class PinyinEngine:
             # 中文文本里蹦出一个阿拉伯数字，比「按了没反应」更糟。
             return True
         if keyval == KEY_SPACE:
-            # 候选为空时放给应用：用户按空格就是想打一个空格。
+            # 越界时放给应用。与 composing 态同一个口径（见那里）。
             #
-            # ``select`` 对越界是**静默 return**，原来这里一律
-            # ``return True``，于是这个按键被吞掉、什么也没发生。
-            # 候选池为空是真实存在的（打分会剔掉繁体单字、联想末字查不到
-            # 搭配时 next_words 返回空），只是被「打不出拼音给高频词兜底」
-            # 挡着、极少出现——所以之前一直没被发现。
-            if not self.page_candidates:
-                return False
-            self.select(0)
-            return True
+            # 注意返回 False 时本函数末尾的 ``exit_associate()`` 仍会执行，
+            # 所以联想窗会正常关闭、state 回到 ST_IDLE——实测确认过。
+            return self._select_at(0)
         if keyval == KEY_TAB:
-            # Tab = 「选下一个候选」，即当前页的第 2 项（页内下标 1）。
-            #
-            # 这里原来写的是 ``self.page * self.page_size + 1``——那是**全局**
-            # 下标，而 ``select`` 收的是**页内**下标。第 0 页时全局 1 恰好
-            # 等于页内 1，**掩盖了错位**；翻到第 1 页后 nxt=10 超出
-            # page_candidates（长度 9），被 select 开头的边界检查静默挡掉，
-            # Tab 就成了一个什么都不做的死键。实测第 1、2 页都是。
-            self.select(TAB_SELECT_INDEX)
-            return True
+              # 与 composing 态同一处修正（见那里）：页内下标，不是全局下标。
+              #
+              # 越界返回 False 时，本函数末尾的 ``exit_associate()`` 不会被
+              # 走到——所以这里显式退出，保持「越界 -> 联想窗关闭」和其它键
+              # 一致，否则会残留一个空联想窗。
+              if not self._select_at(TAB_SELECT_INDEX):
+                  self.exit_associate()
+              return True
         if keyval in (KEY_PAGE_DOWN, KEY_DOWN, KEY_MINUS, KEY_COMMA):
             self.turn_page(1)
             return True

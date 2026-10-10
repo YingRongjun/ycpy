@@ -97,6 +97,8 @@ FUZZY_DEEP_MIN_EXACT = 3
 #: 整个抹掉——而它给的二元组加权 ``W_BIGRAM_USER=90000`` 一次就 +9 万分，
 #: 比字频分的总波动（几千）大一个数量级，于是顺序整个翻转。
 #:
+#: （注：那次硬编码现已改成按 ``user_weight`` 比例换算，见 ``Composer.score_with_context``。这里保留 90000 是因为它解释的是**量级**——二元组一次能加 9 万，比语料分总波动大一个数量级，这个事实没变。）
+#:
 #: 取 150000 的依据（实测多字候选的分数带 1016~156970）：
 #:
 #:     中国   freq=129470  总分 156970
@@ -214,7 +216,7 @@ class Composer:
         #: ``apply_user_counts(user.words if config.enable_learning else {})``），
         #: 但**二元组是另一条路**，引擎那边管不到，所以这里自己记一份，
         #: 供 ``score_with_context`` 判断。
-        self._learning_enabled = True
+        self.learning_enabled = True
         #: 精确命中少于这个数时，才额外去试「猜出来的变体」。
         #: 设成 0 表示永远只走精确匹配，等于关掉容错。
         self.fuzzy_min_exact = FUZZY_MIN_EXACT
@@ -359,8 +361,17 @@ class Composer:
                 out.append(Candidate(text, "", score))
 
         # 1) 用户自己的历史（最强信号）
-        for text, count in self.user.context_words(context):
-            push(text, self.TIER_USER + count)
+        #
+        # **必须跟着两个开关走。** 原来这里是 ``TIER_USER + count``，
+        # 硬编码 300 万、完全不看配置，于是「关闭学习我的用词」和「我的词频
+        # 权重 = 0」都关不掉它——实测关掉之后联想 top 恒为 3,000,001。
+        #
+        # 上一次修「关学习」只接了 ``score_with_context`` 一处，这里和下面
+        # 的整句切分（``_segment_paths``）都漏了。一共三条消费用户二元组/
+        # 词频的路径，必须一起看，只修一处等于没修。
+        if self.learning_enabled and self.user_weight > 0:
+            for text, count in self.user.context_words(context):
+                push(text, self.TIER_USER * self._user_ratio() + count)
 
         # 2) 语料静态搭配：上下文从长到短逐级回退
         for length in range(min(4, len(context)), 0, -1):
@@ -381,7 +392,7 @@ class Composer:
         for text, score in fallback:
             push(text, self.TIER_CHAR + score)
 
-        # 4) 最后一层：上文末字缺搭配数据时，用用户词频里以该字开头的词。
+        # 4) 最后一层：上文末字缺搭配数据时，用**主词典**里以该字开头的词。
         #
         #    踩过的坑：字级搭配表只收语料里最高频的 2500 个字（build_dict.py 的
         #    TOP_CHARS），生僻字不在其中。选完「陈兴瑜」再按分号，末字「瑜」
@@ -574,6 +585,8 @@ class Composer:
             # 分区被整个抹掉——而它给的二元组加权 W_BIGRAM_USER=90000，
             # 一次就 +9 万分，比字频分的总波动（几千）大一个数量级，
             # 于是「會」被从第 141 位顶到第 4 位，插到「灰」前面。
+            # （那次硬编码现已改成按 user_weight 比例换算；90000 保留下来是因为
+            #  它解释的是**量级**——二元组一次能加 9 万，这个事实没变。）
             # 复现时要先给繁体字造一条二元组（真实用户词库里就有 45 条含繁体的）。
             #
             # 所以改成**在打分阶段就不让它进池子**：任何后续排序都无从复活它。
@@ -672,7 +685,13 @@ class Composer:
             score = -path.score * W_SEGMENT_BASE - rank * W_SEGMENT_RANK_STEP
 
             # 用户确实打过这一整串，是最强信号，给满额。
-            whole = self.user.word_count(path.text)
+            #
+            # 这两处用 ``self.user_weight``，所以权重为 0 时自动归零；
+            # 但**「关闭学习我的用词」只清了单词频、没有清 user_weight**，
+            # 于是关掉之后这里照样 +18000（60000 × 0.15 × 2）。这是
+            # 「关学习」三条消费路径里漏掉的一条。
+            ratio = self._user_ratio()
+            whole = self.user.word_count(path.text) if ratio > 0 else 0
             if whole:
                 score += self.user_weight * whole * W_SEGMENT_USER_SHRINK
 
@@ -680,7 +699,7 @@ class Composer:
             # 「到将好」。这一项只负责在切法接近时打破「一起/一切」这类
             # 词频几乎相同的歧义。
             for wid in path.word_ids:
-                uf = user_freq[wid]
+                uf = user_freq[wid] if ratio > 0 else 0
                 if uf:
                     score += self.user_weight * uf * W_SEGMENT_USER_SHRINK
             out.append(Candidate(path.text, path.pinyin, score))
@@ -901,6 +920,20 @@ class Composer:
             if extra:
                 scored[i] = (item[0] + extra, item[1], item[2])
 
+    def _user_ratio(self) -> float:
+        """用户数据相对默认权重的比例（0~1 之间按用户设置缩放）。
+
+        ``user_weight`` 存的是**绝对值**（首选项滑块给的就是 0~60000），
+        而各处的 TIER 常量（``TIER_USER`` 三百万等）是按 ``W_USER`` 为基准
+        定的。用户把权重调低时，所有用户数据项都该按同一比例缩小，否则
+        「调低权重」只对一部分词频生效。
+
+        「关闭学习」时返回 0——由调用方直接跳过更好（省掉无用的遍历）。
+        """
+        if not self.learning_enabled or self.user_weight <= 0:
+            return 0.0
+        return self.user_weight / W_USER
+
     def score_with_context(self, candidates: list[Candidate], context: str | None) -> None:
         """按已上屏的上下文重排。原地修改。"""
         if not context:
@@ -920,7 +953,7 @@ class Composer:
         # 换算按比例而不是直接用 user_weight：二元组是「上下文 -> 后继词」的
         # 强信号，值得比单词频更高（原来 90000 vs 60000，比例 1.5），但不该
         # 脱离用户对「用户数据占多大分量」的判断。
-        if self.user_weight <= 0 or not self._learning_enabled:
+        if self.user_weight <= 0 or not self.learning_enabled:
             return
         weight = W_BIGRAM_USER * (self.user_weight / W_USER)
         for cand in candidates:
