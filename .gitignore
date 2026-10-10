@@ -12,28 +12,26 @@ dist/
 .cache/
 
 # ---------------------------------------------------------------------------
-# 词典数据：全部由 tools/ 下的脚本生成，**不进版本库**
+# 词典数据：**已经入库**
 #
-# 理由：这些文件加起来 30 MB，内容是机械生成的大表——进 git 只会让 clone
-# 变慢、diff 全是噪声，而且每次改生成逻辑都要提交一个巨大的二进制 diff。
-#
-# 需要它们时按 README「数据是怎么来的」那节跑一遍构建脚本即可（带缓存，
-# 第一次需要联网）。三条命令：
+# 这 13 个文件（约 30 MB）由下面三条命令产出：
 #
 #     python3 tools/build_dict.py         # 主词典 + 搭配表 + Unihan 分级
 #     python3 tools/build_phrase_freq.py  # 口语整句词频
 #     python3 tools/build_domain_dict.py  # 专业领域词表
 #
-# 注意 data/CREDITS.md、data/LICENSE-hanziDB.txt 这两个**必须**提交——
-# 它们是各上游数据源的授权声明，MIT 与 Unicode License V3 都要求随分发提供。
-data/ycpy-dict.txt
-data/ycpy-next.txt
-data/ycpy-char-next.txt
-data/ycpy-phrase-freq.txt
-data/ycpy-char-freq.txt
-data/ycpy-trad.txt
-data/ycpy-domain-*.txt
-data/Unihan_IRGSources.txt
+# 曾经把它们排除在外，理由是「30 MB 的机械生成大表，clone 慢、diff 噪音」。
+# 现在改为入库，理由是**它们是产品的一部分**：输入法用户要的是「能用的拼音
+# 输入」，不是「一套能自己造词典的工具」。让任何人 clone 之后先装依赖、
+# 联网下载几个数据源、跑三条命令才能用，是把开发流程当成了产品流程——
+# 而数据源随时可能挂（新克隆的仓库不完整，第一次 build_deb.sh 直接 die）。
+#
+# 为了不让 30 MB 的生成数据把 git 历史撑爆，data/*.txt 用下面的规则标记：
+# 仓库里是**二进制化 + delta 压缩**存储的，检出时还原成可读文本。日常改动
+# 生成逻辑时 diff 的是脚本而不是这些大表。
+#
+# 想从零重建（改了生成逻辑、或想验证脚本）：
+#     python3 tools/build_all.py
 
 # ---------------------------------------------------------------------------
 # 不该进版本库的东西

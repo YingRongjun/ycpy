@@ -28,25 +28,39 @@ ibus restart
 
 ## 从源码编译
 
-**仓库不含词典数据**——约 30 MB 的生成产物全部由脚本产出（内容是机械生成
-的大表，进版本库只会让 clone 变慢、diff 全是噪声）。所以 clone 之后要先构建，
-第一次需要联网：
+词典数据（约 30 MB）**已经包含在仓库里**，clone 下来直接打包：
 
 ```bash
 git clone https://github.com/YingRongjun/ycpy.git
 cd ycpy
-
-python3 tools/build_dict.py          # 主词典 + 搭配表 + Unihan 分级
-python3 tools/build_phrase_freq.py   # 口语整句词频
-python3 tools/build_domain_dict.py   # 专业领域词表（可选）
 
 sh tools/build_deb.sh                # 产出 build/deb/ycpy_1.0.0_amd64.deb
 sudo apt install ./build/deb/ycpy_1.0.0_amd64.deb
 ibus restart
 ```
 
-三个脚本都支持 `--offline`（只用本地缓存重新生成），缓存默认在
-`~/.cache/ycpy-build/`。
+### 重新生成词典（可选）
+
+只有改了 `tools/` 下的生成脚本、或想验证它们时才需要。这一步要联网：
+
+```bash
+python3 tools/build_all.py           # 生成全部 13 个数据文件
+
+python3 tools/build_all.py --offline       # 只用本地缓存，不联网
+python3 tools/build_all.py --skip-domain   # 跳过专业词库（最耗时）
+python3 tools/build_all.py --force         # 已存在的也重建
+```
+
+它实际调用三个脚本（`build_trad.py` 和 `build_char_freq.py` 不被
+`build_dict.py` 调用，所以一共五个）：
+
+```bash
+python3 tools/build_dict.py          # 主词典 + 搭配表 + Unihan 分级
+python3 tools/build_phrase_freq.py   # 口语整句词频
+python3 tools/build_domain_dict.py   # 专业领域词表
+```
+
+缓存默认在 `~/.cache/ycpy-build/`。
 
 ## 测试
 

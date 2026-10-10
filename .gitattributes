@@ -1,0 +1,25 @@
+# data/*.txt 是构建产物（约 30 MB），由 tools/ 下的脚本从公开数据源生成：
+#
+#     python3 tools/build_dict.py         # 主词典 + 搭配表 + Unihan 分级
+#     python3 tools/build_phrase_freq.py  # 口语整句词频
+#     python3 tools/build_domain_dict.py  # 专业领域词表
+#
+# 曾经把它们排除在版本库外，理由是「30 MB 的机械生成大表，clone 慢、diff
+# 噪音」。现在入库，因为它们是**产品的一部分**：输入法用户要的是「能用的
+# 拼音输入」，不是「一套能自己造词典的工具」。
+#
+# `binary` 这个属性的**唯一**作用是让 git 不把 diff/merge 当文本处理——
+# 也就是 `git diff` 不会拿几 MB 的内容刷屏，改动显示成一行「Binary files
+# differ」。
+#
+# 它**不改变存储体积**（实测：标记与否 .git 都是 3.6 MB，git 对文本本来就用
+# zlib + delta）。所以别指望它减小 clone 体积。
+#
+# 代价是不能在 GitHub 网页上预览这些文件、不能用 `git blame` 追行级历史。
+# 对生成产物来说这两点都不重要。
+data/*.txt binary -diff -merge -text
+
+# 授权声明必须保持可读、可 diff——它们是法律文件，改动要能审阅。
+data/CREDITS.md text
+data/LICENSE-hanziDB.txt text
+data/*.md text

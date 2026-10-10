@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import sys
 import tempfile
@@ -3258,6 +3259,57 @@ class BigramRespectsUserSettingsTest(unittest.TestCase):
         off = self.probe({"user_freq_weight": 60000}, False)
         on = self.probe({"user_freq_weight": 60000}, True)
         self.assertNotEqual(off, on, "默认配置下二元组应该生效")
+
+
+class BuildAllCoversEveryDataFileTest(unittest.TestCase):
+    """``tools/build_all.py`` 生成的产物必须覆盖 ``build_deb.sh`` 要的全部文件。
+
+    这条不变量很容易悄悄失配：新增一个数据文件时，可能只记得改
+    ``build_deb.sh``（它会 ``die`` 并提示跑某个脚本），忘了在
+    ``build_all.py`` 里登记——那样「一条命令生成全部」就名不副实，新人
+    照README 做完仍然构建失败，而且报错发生在跑了很久之后。
+
+    这里直接从两个文件的源码里解析集合比对，不实际跑构建（那要联网）。
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _declared_outputs(self):
+        src = open(os.path.join(self.ROOT, "tools", "build_all.py"),
+                   encoding="utf-8").read()
+        block = src[src.index("STEPS = ["):src.index("DOMAIN_SCRIPTS")]
+        return set(re.findall(r'"([^"]+\.txt)"', block))
+
+    def _required_by_deb(self):
+        src = open(os.path.join(self.ROOT, "tools", "build_deb.sh"),
+                   encoding="utf-8").read()
+        files = set(re.findall(r"data/([A-Za-z0-9_.\-]+\.txt)", src))
+        # 领域文件走循环：for _d in it caijing law ...
+        loop = re.search(r"for _d in ([a-z ]+);", src)
+        if loop:
+            for name in loop.group(1).split():
+                files.add("ycpy-domain-%s.txt" % name)
+        return files
+
+    def test_build_all_generates_everything_the_deb_needs(self):
+        declared = self._declared_outputs()
+        required = self._required_by_deb()
+        # LICENSE-hanziDB.txt 随仓库提交（授权声明），不由脚本生成。
+        required.discard("LICENSE-hanziDB.txt")
+        missing = required - declared
+        self.assertEqual(
+            missing, set(),
+            "build_deb.sh 要这些文件，但 build_all.py 不生成：%s"
+            % sorted(missing))
+
+    def test_build_all_has_no_useless_entries(self):
+        declared = self._declared_outputs()
+        required = self._required_by_deb()
+        extra = declared - required
+        self.assertEqual(
+            extra, set(),
+            "build_all.py 生成了这些文件但 deb 不用，要么删掉登记，"
+            "要么说明为什么需要：%s" % sorted(extra))
 
 
 class AssociatePassthroughTest(unittest.TestCase):
