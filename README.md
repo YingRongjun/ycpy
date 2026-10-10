@@ -1,7 +1,7 @@
 # 瀛澈拼音（ycpy）
 
-跑在 IBus 上的拼音输入法引擎，纯 Python，**不需要编译、不需要 root、不装任何
-第三方 pip 包**。
+跑在 IBus 上的拼音输入法引擎，纯 Python，**不需要编译、不需要 root、
+不装任何第三方 pip 包**。
 
 ```
 cxy         ->  程序员  陈兴瑜  常见于  产学研  磁效应 ...
@@ -9,9 +9,8 @@ nihao       ->  你好
 ```
 
 - **全拼 + 首字母**两种输入，混着写也能命中前缀；
-- **联想输入**：上屏一个词后按 `Ctrl+;` 给出后继词；
-- **记忆用户高频词**：选过的词排到前面，落盘保存；
-- **专业领域词库**：首选项里勾选 IT / 财经 / 法律 / 医学 / 饮食 / 汽车；
+- **联想输入**（`Ctrl+;`）与**用户词频记忆**；
+- **专业领域词库**：勾选 IT / 财经 / 法律 / 医学 / 饮食 / 汽车；
 - 词典 50 万词条，引擎启动 0.05 秒。
 
 ## 安装
@@ -23,12 +22,26 @@ sudo apt install ./ycpy_1.0.0_amd64.deb
 ibus restart
 ```
 
-装完不需要注销重登。然后 **设置 → 键盘 → 输入源 → ＋ → 其他语言 → 中文 →
-瀛澈拼音**。
+装完不需要注销重登。**还要把输入法加进列表**（deb 只负责让 ibus 认得它，
+不会替你改 GNOME 的输入源设置）：
+
+**设置 → 键盘 → 输入源 → ＋ → 其他语言 → 中文 → 瀛澈拼音**
+
+> **加了之后列表里又没了？** 这是 `ibus restart` 的时序竞争：daemon 重启的
+> 那一刻引擎还没就绪，GNOME 重建列表时把这一项丢了。重新添加即可，或者：
+>
+> ```bash
+> gsettings set org.gnome.desktop.input-sources sources \
+>   "[('ibus', 'ycpy'), ('xkb', 'cn'), ('ibus', 'libpinyin')]"
+> ```
+>
+> 仍然没有就按顺序查四点——**症状一样，成因至少有四个**：组件 XML 合法性
+> → `ibus list-engine | grep ycpy` → `gsettings get … sources` → 删
+> `~/.cache/ibus/bus/registry` 再重启。
 
 ## 从源码编译
 
-词典数据（约 30 MB）**已经包含在仓库里**，clone 下来直接打包：
+词典数据（约 30 MB）**已在仓库里**，clone 下来直接打包：
 
 ```bash
 git clone https://github.com/YingRongjun/ycpy.git
@@ -41,7 +54,7 @@ ibus restart
 
 ### 重新生成词典（可选）
 
-只有改了 `tools/` 下的生成脚本、或想验证它们时才需要。这一步要联网：
+只有改了 `tools/` 下的生成脚本、或想验证它们时才需要，要联网：
 
 ```bash
 python3 tools/build_all.py           # 生成全部 13 个数据文件

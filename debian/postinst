@@ -8,22 +8,28 @@
 set -e
 
 # ibus 1.5.x 只在 daemon **启动时**扫一次组件目录，而且把注册表缓存写进
-# ~/.cache/ibus/bus/registry。装完必须清掉这个缓存并重启 daemon，
-# 否则新组件要等下次注销才生效。
-# 注意不是「重启 GNOME 桌面」——ibus-daemon 是独立进程，可以单独重启。
-if command -v ibus >/dev/null 2>&1; then
-    # 这里**不能**删 /root/.cache（那是 root 的），只能提示用户自己清。
-    # 实际上 daemon 会以登录用户身份重启，缓存由它自己重建。
-    if command -v ibus >/dev/null 2>&1; then
-        ibus restart >/dev/null 2>&1 || true
-    fi
+# ~/.cache/ibus/bus/registry。装完要重启 daemon，新组件才会被认到。
+#
+# 但 **postinst 是以 root 跑的，它没有登录用户的 D-Bus 连接**，所以在这里
+# 调 `ibus restart` 连的是 root 那个 bus 套接字，对用户的 daemon 毫无作用。
+# 原来的写法看着像「装完已经重启过了」，实际是空转，还会让人以为生效了——
+# 于是真出问题时（GNOME 输入源列表里没有 ycpy）会往错的方向查。
+#
+# 同样原因也不能删 ~/.cache/ibus/bus/registry（那是用户的）。真正需要做的
+# 留给用户在自己的终端里执行，也就是下面那段提示的实际内容。
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    # 只有确实处在登录用户的 bus 上时才重启得动。Debian 包不会走到这里
+    # （安装时没有这个变量），留着是为了将来若支持以用户身份调用。
+    ibus restart >/dev/null 2>&1 || true
 fi
 
 echo "ycpy 已安装。"
 echo
-echo "如果 GNOME 的输入法列表里还看不到 ycpy，执行："
-echo "  rm -f ~/.cache/ibus/bus/registry   # 组件注册表缓存，改了组件目录要删"
-echo "  ibus restart                         # 或注销重登"
+echo "请执行这两步让它立刻可用："
+echo "  ibus restart                                     # 让 daemon 重新扫组件目录"
+echo "  设置 → 键盘 → 输入源 → ＋ → 其他语言 → 中文 → 瀛澈拼音"
 echo
-echo "在「设置 → 键盘 → 输入源」里添加 ycpy 即可使用。"
+echo "如果列表里仍然没有，检查组件注册表缓存："
+echo "  rm -f ~/.cache/ibus/bus/registry && ibus restart"
+echo
 echo "首选项界面：点右上角输入法图标 → 「首选项…」"
