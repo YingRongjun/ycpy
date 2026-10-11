@@ -19,18 +19,38 @@ set -e
 # （不需要 root），脚本里的绝对路径就成了真刀真枪。
 # 之前这脚本里就有两行这样的 rm，是这个测试过程里才暴露出来的。
 
-# ibus 的注册表缓存在**每个登录用户**的 ~/.cache/ibus/bus/registry 下，
-# 属于用户数据，不该（也没法）在这里清。只提示用户。
-if command -v ibus >/dev/null 2>&1; then
-    ibus restart >/dev/null 2>&1 || true
-fi
+# 残留分三处，**只有第一处是 dpkg 管得到的**：
+#
+#   1. GNOME 输入源列表 —— GNOME 只认自己的配置（dconf），不知道包卸没卸。
+#      引擎已经不存在了，设置里却还渲染着这一项，点它没反应。
+#      **这是「右上角没了、设置里还在」的原因。**
+#   2. ibus 注册表缓存 —— 每个登录用户的 ~/.cache/ibus/bus/registry。
+#   3. 用户词频数据 —— 有意保留。
+#
+# 1 和 2 都在**用户的 dconf / HOME** 下，postrm 以 root 跑，既没有
+# DBUS_SESSION_BUS_ADDRESS 也用错 HOME，**在这里清是无效的**
+# （清 dconf 需要 gsettings，那是 per-user 的；改 HOME 更是越权）。
+#
+# 所以这里只负责把话说清楚。顺带修掉原来那个空转的 `ibus restart`
+# ——它连的是 root 的 bus 套接字，对用户的 daemon 毫无作用。
 
 cat <<'EOF'
-ycpy 已移除。
+ycpy 已移除（词频数据已保留）。
 
-如果 GNOME 的输入法列表里还残留 ycpy，执行：
-  rm -f ~/.cache/ibus/bus/registry    # 组件注册表缓存
-  ibus restart
+如果 GNOME 的「设置 → 键盘 → 输入源」里还残留 ycpy——这是正常的，
+ GNOME 的输入源列表只读自己的配置（dconf），不知道包已经卸掉了。
+ 两处残留都要在**你自己的终端**里清：
+
+   # 1) 从 GNOME 输入源列表里去掉 ycpy
+   gsettings get org.gnome.desktop.input-sources sources   # 先看现状
+   gsettings set org.gnome.desktop.input-sources sources \
+     "[('xkb', 'cn'), ('ibus', 'libpinyin')]"              # 按需改成你自己的列表
+
+   # 2) 清 ibus 的组件注册表缓存并重启 daemon
+   rm -f ~/.cache/ibus/bus/registry
+   ibus restart
+
+   也可以直接在「设置 → 键盘 → 输入源」面板里点那一项的「－」删掉。
 
 你的词频学习数据仍然保留：
   ~/.config/py-pinyin-ibus/          配置
