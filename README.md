@@ -31,9 +31,15 @@ ibus restart
 > 那一刻引擎还没就绪，GNOME 重建列表时把这一项丢了。重新添加即可，或者：
 >
 > ```bash
+> gsettings set org.gnome.desktop.input-sources mru-sources \
+>   "[('ibus', 'ycpy'), ('ibus', 'libpinyin'), ('xkb', 'cn')]"
 > gsettings set org.gnome.desktop.input-sources sources \
 >   "[('ibus', 'ycpy'), ('xkb', 'cn'), ('ibus', 'libpinyin')]"
 > ```
+>
+> **两个键都要改**：GNOME 有「当前启用」（`sources`）和「最近使用」
+> （`mru-sources`）两份配置，只改前一个会被后者**回填**——这就是「删了又
+> 出现」。卸载后残留也是同一个机制（GNOME 只读自己的 dconf，不知道包卸没卸）。
 >
 > 仍然没有就按顺序查四点——**症状一样，成因至少有四个**：组件 XML 合法性
 > → `ibus list-engine | grep ycpy` → `gsettings get … sources` → 删

@@ -24,6 +24,8 @@ set -e
 #   1. GNOME 输入源列表 —— GNOME 只认自己的配置（dconf），不知道包卸没卸。
 #      引擎已经不存在了，设置里却还渲染着这一项，点它没反应。
 #      **这是「右上角没了、设置里还在」的原因。**
+#      注意它有**两个**键：``sources``（当前启用）和 ``mru-sources``（最近
+#      使用）。只清前一个会被后者回填——实测就是「删了又出现」。
 #   2. ibus 注册表缓存 —— 每个登录用户的 ~/.cache/ibus/bus/registry。
 #   3. 用户词频数据 —— 有意保留。
 #
@@ -42,9 +44,13 @@ ycpy 已移除（词频数据已保留）。
  两处残留都要在**你自己的终端**里清：
 
    # 1) 从 GNOME 输入源列表里去掉 ycpy
-   gsettings get org.gnome.desktop.input-sources sources   # 先看现状
+   #    **mru-sources 和 sources 两个都要改**：只改 sources 的话，GNOME 会
+   #    从 mru-sources（「最近使用」）把 ycpy 回填回来——这就是「删了又出现」。
+   #    下面的值按你自己的实际列表调整。
+   gsettings set org.gnome.desktop.input-sources mru-sources \
+     "[('ibus', 'libpinyin'), ('xkb', 'cn')]"
    gsettings set org.gnome.desktop.input-sources sources \
-     "[('xkb', 'cn'), ('ibus', 'libpinyin')]"              # 按需改成你自己的列表
+     "[('xkb', 'cn'), ('ibus', 'libpinyin')]"
 
    # 2) 清 ibus 的组件注册表缓存并重启 daemon
    rm -f ~/.cache/ibus/bus/registry
