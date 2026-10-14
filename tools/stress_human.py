@@ -150,6 +150,8 @@ class HumanStressor:
         self.app_text: list[str] = []
         self.newlines_to_app = 0
         self.backspaces_to_app = 0
+        #: keyval -> 物理键编号。见 _kc_for
+        self._kcmap: dict[int, int] = {}
 
         tmp = tempfile.mkdtemp(prefix="ycpy-human-")
         self.tmp = tmp
@@ -182,7 +184,28 @@ class HumanStressor:
         print("!! BUG[%s] %s" % (kind, detail), flush=True)
         print("   序列: %s" % " ".join(self.current[-30:]), flush=True)
 
-    def press(self, keyval, modifier=0, note=""):
+    def _kc_for(self, keyval: int) -> int:
+        """给 keyval 分配一个稳定的**物理键**编号（真实 X 里的 keycode）。
+
+        这是压测以前的**结构性盲区**：``process_key`` 一直传 ``keycode=0``，
+        于是配对只能靠 keyval，而 keyval 在真实链路上**是会变的**——
+
+            Shift↓  A↓(keyval=0x41)  Shift↑  A↑(keyval=0x61)
+
+        「keyval 在按下与抬起之间变了」这种情况因此**永远测不出来**，
+        用户报的「随机连续触发按键」也就一直复现不了。补上 keycode 之后，
+        压测走的才是真实链路的配对方式。
+
+        大小写共用一个编号：'A' 与 'a' 本来就是同一个物理键，这正是
+        「keyval 会变、keycode 不变」的前提。
+        """
+        ident = keyval + 0x20 if 0x41 <= keyval <= 0x5A else keyval
+        if ident not in self._kcmap:
+            # 8..255 与 X 惯例一致；用到的 keyval 就几十个，不会绕回来撞车。
+            self._kcmap[ident] = 8 + len(self._kcmap) % 248
+        return self._kcmap[ident]
+
+    def press(self, keyval, modifier=0, note="", keycode=None):
         """模拟一次**按下**，并断言客户端收到的东西是否合理。"""
         e = self.engine
         composing = (e.state == 1 and bool(e.buffer))
@@ -190,7 +213,9 @@ class HumanStressor:
         before_bs = self.backspaces_to_app
 
         self.keys += 1
-        consumed = self.engine.process_key(keyval, 0, modifier)
+        consumed = self.engine.process_key(
+            keyval, self._kc_for(keyval) if keycode is None else keycode,
+            modifier)
 
         # ---- 核心不变量：组字中，回车/退格**绝不能**透传给应用 ----
         #
@@ -234,15 +259,17 @@ class HumanStressor:
                                         note))
         return consumed
 
-    def release(self, keyval, modifier=0):
+    def release(self, keyval, modifier=0, keycode=None):
         self._last_release_ret = self.engine.process_key(
-            keyval, 0, modifier | (1 << 30))
+            keyval, self._kc_for(keyval) if keycode is None else keycode,
+            modifier | (1 << 30))
         return self._last_release_ret
 
-    def tap(self, keyval, modifier=0, note=""):
-        """一次完整的按下 + 抬起。"""
-        r = self.press(keyval, modifier, note)
-        self.release(keyval, modifier)
+    def tap(self, keyval, modifier=0, note="", keycode=None):
+        """一次完整的按下 + 抬起（默认同一个 keycode——物理键没变）。"""
+        kc = self._kc_for(keyval) if keycode is None else keycode
+        r = self.press(keyval, modifier, note, keycode=kc)
+        self.release(keyval, modifier, keycode=kc)
         return r
 
     def type_word(self, word=None):
@@ -428,6 +455,58 @@ class HumanStressor:
                       "Shift 当修饰键用完后仍挂着待切换标记")
         self.check("shift_modifier")
 
+    def scenario_modifier_release_order(self):
+        """先松修饰键、后松字母 —— 同一个物理键的 keyval 在中途会变。
+
+        回归 bug（用户报「还是随机的会出现连续触发按键的情况，可能还是有
+        地方对释放按键没处理好」）。
+
+        X 里 ``keyval = f(keycode, 修饰键状态)``，keyval 是**解释出来的结果**，
+        不是硬件事实。「先松 Shift 再松字母」在真人打字里很常见（把 Shift 当
+        快速修饰键用，手先离开 Shift），于是真实序列是::
+
+            Shift↓   A↓(keyval=0x41)   Shift↑   A↑(keyval=0x61)
+                                                    ^^^^^^^^^^^
+                                       抬起时 Shift 已经没了，解释成 'a'
+
+        按下走的是「Shift/CapsLock 下的字母直接透传」那条 -> 记 ``False``；
+        抬起若按 keyval 去找记录就找不到 -> 兜底 ``True``。于是
+
+            press   -> 应用收到 KeyPress
+            release -> 应用收不到 KeyRelease
+            -> 客户端认为键还按着，开始自动重复 = 用户看到的连续触发
+
+        **为什么以前的压测抓不到**：``tap()`` 的 press/release 永远用同一个
+        keyval，`keycode` 又一律传 0，「keyval 变了」这个前提根本没被制造
+        出来。这个场景专门制造它，且 keycode 两次相同（物理键没变）。
+        """
+        kc_shift = self._kc_for(KEY_SHIFT_L)
+        ch = self.rnd.choice("abcdefghijklmnopqrstuvwxyz")
+        kc_letter = self._kc_for(ord(ch))
+        up, lo = ord(ch.upper()), ord(ch)
+
+        if self.rnd.random() < 0.8:
+            # Shift↓ A↓ Shift↑ A↑
+            self.press(KEY_SHIFT_L, 0, keycode=kc_shift, note="(修饰键)")
+            self.pause(0.03, 0.09)
+            p = self.press(up, SHIFT_MASK, keycode=kc_letter, note="(大写)")
+            self.pause(0.03, 0.10)
+            self.release(KEY_SHIFT_L, 0, keycode=kc_shift)
+            r = self.release(lo, 0, keycode=kc_letter)   # keyval 已经从 up 变成 lo
+        else:
+            # CapsLock 开着按 a -> 中途关掉 CapsLock -> 才抬起
+            p = self.press(up, LOCK_MASK, keycode=kc_letter, note="(CapsLock)")
+            self.pause(0.03, 0.10)
+            r = self.release(lo, 0, keycode=kc_letter)   # keyval 已经从 up 变成 lo
+
+        if p != r:
+            self.fail("press_release_unpaired",
+                      "keycode=%d：按 %s(keyval=%#x) 返回 %s，"
+                      "抬 %s(keyval=%#x) 返回 %s —— 客户端只收到 press、"
+                      "收不到 release，会以为键还按着从而连续触发"
+                      % (kc_letter, chr(up), up, p, chr(lo), lo, r))
+        self.check("modifier_release_order")
+
     def scenario_sentence(self):
         """整句拼接（触发分词）。"""
         word = self.type_word()
@@ -470,6 +549,7 @@ class HumanStressor:
         ("mouse_click_popup", 8),
         ("english_toggle", 7),
         ("shift_modifier", 7),
+        ("modifier_release_order", 8),
         ("sentence", 8),
         ("punct", 4),
         ("domains", 6),

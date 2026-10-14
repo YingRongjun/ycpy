@@ -78,6 +78,40 @@ KEY_SHIFT_R = 0xFFE2
 #: ``_trim_press_records``。
 _PRESS_CONSUMED_MAX = 512
 
+
+def _pair_key(keyval: int, keycode: int) -> int:
+    """一次 press/release 拿什么来配对。**必须优先 keycode，不能只用 keyval。**
+
+    X 里 ``keyval = f(keycode, 修饰键状态)``——keyval 是**解释出来的结果**，
+    不是硬件事实。同一个物理键在修饰键状态变了之后再抬起，keyval 就不是
+    按下时那个了。最常见的就是字母：
+
+        Shift↓   A↓(keyval='A')    Shift↑    A↑(keyval='a')
+                                                    ^^^^^^^^^
+                                       抬起时 Shift 已经没了，解释成 'a'
+
+    按下那一下，``_process_press`` 走的是「Shift/CapsLock 下的字母直接透传」
+    那条，记了 ``False``；抬起时拿 'a' 去 pop，pop 不到，兜底返回 ``True``。
+    于是**按下交给了应用、抬起被引擎吞掉**——客户端认为这个键还按着，
+    开始自动重复。用户报的「随机出现连续触发按键」就是它：
+
+        press  'A'+SHIFT  -> False   （应用收到了 KeyPress）
+        release 'a'       -> True    （应用收不到 KeyRelease）
+        -> 客户端按键状态机错乱，重复触发
+
+    CapsLock 同理（``LOCK_MASK`` 一样会改变字母的大小写），所以这条不止
+    「按住 Shift 打大写」时才出现——**Shift 或 CapsLock 在按下与抬起之间
+    变过状态即可**，而这在真人打字时是常态（先松修饰键再松字母的手很多）。
+
+    keycode 是**硬件键**，修饰键状态动不了它，同一物理键的 press 与 release
+    必然相同，所以拿它配对才是对的。
+
+    ``keycode`` 为 0 时退回 keyval——部分后端会给 0，这条退路必须留着。
+    项目里的单测一律传 0（走的就是这条退路），压测则按真实链路传物理键编号。
+    """
+    return keycode or keyval
+
+
 CONTROL_MASK = 1 << 2
 MOD1_MASK = 1 << 3
 #: ibus 用这一位标记「这是按键松开事件，不是按下」（src/ibustypes.h）。
@@ -871,12 +905,25 @@ class PinyinEngine:
         # 松开事件：ibus 用 modifier 的第 30 位标记它。松开本身不产生任何动作，
         # 但必须**回放按下时的结论**，否则客户端会只收到按下、收不到松开。
         if modifier & IBUS_RELEASE_MASK:
-            _trace("release keyval=%#x 记录=%s"
-                   % (keyval, self._press_consumed.get(keyval, "<无>")))
             # 回放**这个键自己**按下时的结论，不是「最后一个被按下的键」的。
             # pop 掉是因为一次 press/release 只配对一次；没有配对的抬起
             # （比如 ibus 送来的杂散 release）拿到 None，按老规矩消费掉。
-            consumed = self._press_consumed.pop(keyval, None)
+            #
+            # 配对键优先用 keycode，见 _pair_key——keyval 会在修饰键状态变化
+            # 前后不同，拿它配对会让「按下透传、抬起被吞」，客户端重复触发。
+            consumed = self._press_consumed.pop(_pair_key(keyval, keycode), None)
+            if consumed is None and keycode:
+                # 按下那次没带 keycode（记在了 keyval 上）、抬起却带了——退回
+                # 按 keyval 再找一次，别因为两边上报口径不一致而错配。
+                consumed = self._press_consumed.pop(keyval, None)
+            # trace 里必须同时有 keyval 与 keycode：光看 keyval 对不上，
+            # 分不清是「杂散抬起」还是「修饰键变了导致 keyval 变了」——
+            # 后者才是真 bug，而它只有对照 press 那行的 keycode 才认得出来。
+            _trace("release keyval=%#x keycode=%d 记录=%s -> %s"
+                   % (keyval, keycode,
+                      "<无>" if consumed is None else consumed,
+                      "兜底 True（客户端收不到 release）"
+                      if consumed is None else "回放按下结论"))
             # 只有 **Shift 自己的抬起** 才结算待办。早先这里不看 keyval，
             # 于是「按 Shift → 按任意键 → 那个键抬起」会触发切换；此时若正在
             # 组字，_toggle_english() 会把整串拼音上屏、预编辑清空——用户看到
@@ -899,8 +946,9 @@ class PinyinEngine:
             return True if consumed is None else consumed
 
         handled = self._process_press(keyval, modifier)
-        _trace("press   keyval=%#x mod=%#x -> %s  (state=%s)"
-               % (keyval, modifier, "吃掉" if handled else "透传", self.state))
+        _trace("press   keyval=%#x keycode=%d mod=%#x -> %s  (state=%s)"
+               % (keyval, keycode, modifier, "吃掉" if handled else "透传",
+                  self.state))
         # 按下 Shift 之后又按了**任何**别的键（不管引擎处不处理），
         # 都说明 Shift 只是当修饰键用（大写、?、!），取消待切换。
         # 早先只在 handled=True 时才清除，透传的键清不掉，待办会一直留着。
@@ -917,7 +965,9 @@ class PinyinEngine:
         # 无界增长。
         if len(self._press_consumed) > _PRESS_CONSUMED_MAX:
             self._trim_press_records()
-        self._press_consumed[keyval] = handled
+        # 用 _pair_key 而不是裸 keyval：keyval 会随修饰键状态变，抬起时就
+        # pop 不到了。见 _pair_key 的完整说明。
+        self._press_consumed[_pair_key(keyval, keycode)] = handled
         return handled
 
     def _trim_press_records(self) -> None:

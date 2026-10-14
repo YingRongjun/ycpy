@@ -137,6 +137,8 @@ class Stressor:
         self.current: list = []
         #: (场景名, 耗时)。用来定位「哪条序列特别慢」。
         self.seq_times: list[tuple[str, float]] = []
+        #: keyval -> 物理键编号。见 _kc_for
+        self._kcmap: dict[int, int] = {}
 
         tmp = tempfile.mkdtemp(prefix="ycpy-stress-")
         self.tmp = tmp
@@ -228,13 +230,28 @@ class Stressor:
         return "".join(self.rnd.choice(COMMON_SYLL)
                        for _ in range(self.rnd.randint(1, max_len)))
 
+    def _kc_for(self, keyval: int) -> int:
+        """给 keyval 分配一个稳定的**物理键**编号（真实 X 里的 keycode）。
+
+        以前一律传 ``keycode=0``，于是配对只能靠 keyval。但 keyval 在真实
+        链路上**会随修饰键状态变**（``Shift↓ A↓ Shift↑ A↑`` 的抬起是 'a'
+        而不是 'A'），「keyval 在按下与抬起之间变了」这种情况因此完全测
+        不出来——用户报的「随机连续触发按键」在快速层一直漏网。
+
+        大小写共用一个编号：'A' 与 'a' 是同一个物理键。
+        """
+        ident = keyval + 0x20 if 0x41 <= keyval <= 0x5A else keyval
+        if ident not in self._kcmap:
+            self._kcmap[ident] = 8 + len(self._kcmap) % 248
+        return self._kcmap[ident]
+
     def do_press(self, keyval, mod=0):
         self.current.append(("D", keyval, mod))
         # 逐按键计时：卡死的序列**永远不会返回**，所以序列级计时抓不到，
         # 必须在按键这一层记。压测里见过「跑到 326 个序列后 CPU 100%
         # 自旋 5 分钟」，就是靠这层定位的。
         t0 = time.monotonic()
-        r = self.engine.process_key(keyval, 0, mod)
+        r = self.engine.process_key(keyval, self._kc_for(keyval), mod)
         dt = time.monotonic() - t0
         if dt > 0.5:
             self.fail("slow_keystroke",
@@ -246,7 +263,8 @@ class Stressor:
 
     def do_release(self, keyval, mod=0):
         self.current.append(("U", keyval, mod))
-        r = self.engine.process_key(keyval, 0, IBUS_RELEASE_MASK | mod)
+        r = self.engine.process_key(keyval, self._kc_for(keyval),
+                                    IBUS_RELEASE_MASK | mod)
         self.keystrokes += 1
         return r
 
@@ -302,11 +320,21 @@ class Stressor:
         self.engine.on_focus_out()
         self.current.append(("FOCUS_IN",))
         self.engine.on_focus_in()
-        if self.engine._press_consumed:
+        # 这里原本断言「记录表必须为空」——那是**已被判为 bug 的旧语义**。
+        # on_focus_out 现在只清「引擎吃掉的」（True）记录，**透传给应用的
+        # （False）必须留下**：它们的抬起要回放 False。抹了就变成
+        # 「应用只收到 press、收不到 release」，于是客户端认为键还按着、
+        # 开始自动重复——用户报的「没碰退格却在连删」「凭空冒出好几个换行」
+        # 根源就在这。
+        #
+        # 断言必须跟着语义走。写死「必须为空」，每次跑都报几十条假 bug
+        # （实测约 20 条/分钟），这一层就彻底没法用来做回归对照了。
+        leftover_consumed = [k for k, v in self.engine._press_consumed.items()
+                             if v]
+        if leftover_consumed:
             self.fail("focus_leftover",
-                      "FocusOut 后仍残留 %d 条按下记录: %r"
-                      % (len(self.engine._press_consumed),
-                         list(self.engine._press_consumed)[:6]))
+                      "FocusOut 后仍残留 %d 条**引擎吃掉的**按下记录: %r"
+                      % (len(leftover_consumed), leftover_consumed[:6]))
         # 焦点回来后继续正常输入，确认没坏
         self.type_text("zhong")
 
@@ -332,6 +360,34 @@ class Stressor:
                 self.fail("shift_release_swallowed",
                           "Shift 抬起被吞（中间夹了别的键）")
         self.check_invariants("中英切换")
+
+    def scenario_modifier_release_order(self):
+        """先松修饰键、后松字母：同一个物理键的 keyval 在中途会变。
+
+        回归 bug（用户报「还是随机的会出现连续触发按键的情况」）。X 里
+        ``keyval = f(keycode, 修饰键状态)``，所以真实序列
+
+            Shift↓   A↓(keyval=0x41)   Shift↑   A↑(keyval=0x61)
+
+        的抬起根本不是按下的那个 keyval。按下记了 ``False``（透传），抬起
+        若按 keyval 找不到记录就兜底 ``True`` -> 应用只收到 press、收不到
+        release -> 认为键还按着 -> 自动重复。
+
+        **这个场景以前测不出来**：``tap()`` 的 press/release 永远用同一个
+        keyval，keycode 又一律传 0，「keyval 变了」这个前提没被制造过。
+        """
+        for _ in range(self.rnd.randint(1, 3)):
+            ch = self.rnd.choice("abcdefghijklmnopqrstuvwxyz")
+            # Shift↓ A↓ Shift↑ A↑ —— 抬起 A 时 Shift 已经没了，
+            # keyval 因此从 'A' 变成 'a'；keycode 两次相同（物理键没变）。
+            self.do_press(KEY_SHIFT_L)
+            p = self.do_press(ord(ch.upper()), SHIFT_MASK)
+            self.do_release(KEY_SHIFT_L)
+            r = self.do_release(ord(ch.lower()))
+            self.check_pairing(ord(ch.lower()), p, r, "先松Shift后松字母")
+            if not self.check_invariants("修饰键抬起顺序"):
+                break
+        self.check_invariants("修饰键抬起顺序")
 
     def scenario_long_sentence(self):
         """长句拼接（触发 k-best 分词）。"""
@@ -384,6 +440,7 @@ class Stressor:
         ("scenario_selection", 10),
         ("scenario_focus_switch", 8),
         ("scenario_english_toggle", 10),
+        ("scenario_modifier_release_order", 6),
         ("scenario_long_sentence", 8),
         ("scenario_typo", 8),
         ("scenario_long_input", 4),

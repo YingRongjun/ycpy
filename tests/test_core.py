@@ -2044,6 +2044,101 @@ class PressReleasePairingTest(unittest.TestCase):
         self.assertIn("_press_consumed", src,
                       "应该用按 keyval 分别记录的 _press_consumed")
 
+    # ------------------------------------------------------------ keyval 会变
+    #
+    # 下面一组是另一条 bug 线（用户报「随机出现连续触发按键」），与上面那个
+    # 「单槽位被覆盖」是不同根因，但症状同源：**按下给了应用、抬起被引擎吞掉**。
+
+    #: 引擎实际收到的物理键编号。绝对值不重要（X keycode 与 evdev 差 8，
+    #: 见 ``tools/probe_keycode.py`` 的实测），重要的是 press/release 一致。
+    KEYCODE = 30
+    LOCK_MASK = 1 << 2
+
+    def test_keyval_change_paired_by_keycode(self):
+        """核心回归：Shift 先抬起 -> 同一物理键的 keyval 变了 -> 仍要配对上。
+
+        回归 bug（用户报「还是随机的会出现连续触发按键的情况」）。
+
+        X 里 ``keyval = f(keycode, 修饰键状态)``，keyval 是**解释出来的结果**，
+        不是硬件事实。真人打字「先松修饰键再松字母」很常见，于是真实序列是
+
+            Shift↓   A↓(keyval=0x41)   Shift↑   A↑(keyval=0x61)
+                                                     ^^^^^^^^^^^
+                                        抬起时 Shift 已经没了，解释成 'a'
+
+        按下那下走的是「Shift/CapsLock 下的字母直接透传」那条 -> 记 ``False``；
+        抬起按 keyval '0x61' 去 pop，旧实现 pop 不到，兜底返回 ``True``：
+
+            press   -> 应用收到 KeyPress
+            release -> 应用收不到 KeyRelease
+            -> 客户端认为这个键还按着，开始自动重复 = 用户看到的连续触发
+
+        keycode 是硬件键，修饰键动不了它，press/release 必然相同，所以拿它
+        配对。**这两点都在真实 X 链路上实测过**（``tools/probe_keycode.py``）：
+        keycode 全非零，且同一键 press=0x41 / release=0x61 而 keycode 恒为 30。
+        """
+        engine = self.make()
+        pressed = engine.process_key(0x41, self.KEYCODE, self.SHIFT_MASK)
+        self.assertFalse(pressed, "Shift 下的字母应透传给应用")
+        released = engine.process_key(0x61, self.KEYCODE, self.RELEASE)
+        self.assertEqual(
+            pressed, released,
+            "按下 %r / 抬起 %r —— 客户端只收到 press、收不到 release，"
+            "会以为键还按着从而连续触发" % (pressed, released))
+
+    def test_capslock_change_paired_by_keycode(self):
+        """CapsLock 同一条：``LOCK_MASK`` 一样会改变字母大小写。"""
+        engine = self.make()
+        pressed = engine.process_key(0x41, self.KEYCODE, self.LOCK_MASK)
+        self.assertFalse(pressed, "CapsLock 下的字母应透传给应用")
+        released = engine.process_key(0x61, self.KEYCODE, self.RELEASE)
+        self.assertEqual(pressed, released,
+                         "CapsLock 前后 keyval 变化导致抬起配不上对")
+
+    def test_keycode_zero_falls_back_to_keyval(self):
+        """``keycode=0``（部分后端 / 全部既有单测与压测）退回 keyval。"""
+        engine = self.make()
+        self.assertTrue(engine.process_key(0x61, 0, 0), "组字应被吃掉")
+        self.assertIn(0x61, engine._press_consumed,
+                      "keycode 缺失时记录应落在 keyval 上，否则既有断言全废")
+        self.assertTrue(engine.process_key(0x61, 0, self.RELEASE))
+
+    def test_release_missing_record_with_keycode_falls_back_to_keyval(self):
+        """按下没带 keycode、抬起带了 -> 退回 keyval 再找一次，别错配。"""
+        engine = self.make()
+        pressed = engine.process_key(0x61, 0, 0)      # 记在 keyval 0x61 上
+        self.assertTrue(pressed, "组字应被吃掉")
+        released = engine.process_key(0x61, self.KEYCODE, self.RELEASE)
+        self.assertEqual(
+            pressed, released,
+            "抬起带了 keycode，按 keycode 找不到却没退回 keyval，"
+            "按下结论回放不出来 -> 客户端重复触发")
+        self.assertNotIn(0x61, engine._press_consumed, "确实 pop 掉了")
+
+    def test_trace_records_keycode(self):
+        """trace 必须同时记 keyval 与 keycode——排查这条 bug 的唯一依据。
+
+        光看 keyval 对不上，分不清是「杂散抬起」还是「修饰键变了导致
+        keyval 变了」；后者只有对照 press 那行的 keycode 才认得出来。
+        """
+        from ycpy import engine as eng_mod
+        path = os.path.join(self.tmp, "trace.log")
+        open(path, "w").close()
+        old = eng_mod.TRACE_PATH
+        eng_mod.TRACE_PATH = path
+        try:
+            e = self.make()
+            e.process_key(0x41, self.KEYCODE, self.SHIFT_MASK)
+            e.process_key(0x61, self.KEYCODE, self.RELEASE)
+        finally:
+            eng_mod.TRACE_PATH = old
+        with open(path, encoding="utf-8") as fp:
+            text = fp.read()
+        self.assertIn("press   keyval=0x41 keycode=%d" % self.KEYCODE, text,
+                      "press 那行没记 keycode，出问题时无从对照")
+        self.assertIn("release keyval=0x61 keycode=%d" % self.KEYCODE, text,
+                      "release 那行没记 keycode，出问题时无从对照")
+
 
 class StalePressRecordTest(unittest.TestCase):
     """焦点切换后不能残留「按下结论」。
