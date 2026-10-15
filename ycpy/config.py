@@ -47,7 +47,7 @@ MODIFIER_NAMES = [
 
 DEFAULTS = {
     # 每页显示几个候选词
-    "page_size": 9,
+    "page_size": 10,
     # 中文/英文切换：默认左 Shift（很多 IM 就是这么做的）
     "zh_en_switch": {"keyval": 0xFFE1, "modifiers": 0},
     # 联想功能开关与热键。
@@ -81,12 +81,16 @@ _MIGRATIONS = (
     ("associate_key", _LEGACY_SEMICOLON_ASSOCIATE, DEFAULTS["associate_key"]),
 )
 
-#: 候选数量可选值。
+#: 候选数量可选值：**5 / 7 / 10，没有 9**。
 #:
-#: 上限是 **10**——数字键总共只有 1~9 和 0 这 10 个，再多就没法用数字键
-#: 直选了。10 这一档靠 ``_digit_index`` 的「1~9 -> 第 1~9 项、0 -> 当页
-#: 最后一项」自然成立：``0`` 在当页正好有 10 个候选时落在第 10 项。
-PAGE_SIZE_CHOICES = (5, 7, 9, 10)
+#: 上限是 10 —— 数字键总共只有 1~9 和 0 这 10 个，再多就没法用数字键直选。
+#: 10 这一档靠 ``_digit_index`` 的「1~9 -> 第 1~9 项、0 -> 当页最后一项」
+#: 自然成立：当页正好 10 个候选时 ``0`` 落在第 10 项，一条新分支都不用加。
+#:
+#: 页长小于 10 时 ``0`` 和最大的那个数字键会指向同一项（9 时按 0 与按 9
+#: 都是第 9 项，5、7 同理），所以只有 10 这一档是 10 个数字键各司其职。
+#: **9 已按需求去掉**——它比 10 少一项，而选词方式上没有任何独到之处。
+PAGE_SIZE_CHOICES = (5, 7, 10)
 
 
 class Config:
@@ -173,8 +177,11 @@ class Config:
     # 常用项的便捷属性
     @property
     def page_size(self) -> int:
-        value = self.get("page_size", 9)
-        return value if value in PAGE_SIZE_CHOICES else 9
+        value = self.get("page_size", DEFAULTS["page_size"])
+        # 不在可选表里**不报错也不提示**，直接回落默认值——所以漏更新
+        # PAGE_SIZE_CHOICES 的症状是「首选项能选、存盘再读就变回去」。
+        # 兜底值也走 DEFAULTS，免得两处 9/10 各改各的。
+        return value if value in PAGE_SIZE_CHOICES else DEFAULTS["page_size"]
 
     @property
     def zh_en_switch(self) -> dict:

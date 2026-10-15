@@ -203,7 +203,7 @@ def launch_preferences() -> None:
         _trace("首选项：启动失败 %r" % exc)
 
 
-PAGE_SIZE = 9   # 默认值；实际以 Config.page_size 为准
+PAGE_SIZE = 10  # 默认值；实际以 Config.page_size 为准
 
 ST_IDLE = 0        # 空闲，字母直接透传
 ST_COMPOSING = 1   # 正在组字
@@ -744,7 +744,7 @@ class PinyinEngine:
         """数字键 → **页内**下标，非数字返回 -1。
 
         映射必须跟着当页的**实际候选数**走，不能写死「1..9 → 0..8、0 → 9」：
-        每页候选数可配 5 / 7 / 9 / 10（``PAGE_SIZE_CHOICES``），写死的话
+        每页候选数可配 5 / 7 / 10（``PAGE_SIZE_CHOICES``），写死的话
         ``page_size=5`` 时按 6/7/8/9/0 全都越界，而 ``select()`` 的边界检查
         是**静默 return** ——于是那 5 个键变成「按了没反应」的死键。
 

@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ycpy import syllables                                   # noqa: E402
 from ycpy.composer import Composer                           # noqa: E402
 from ycpy.config import (                                   # noqa: E402
+    DEFAULTS,
     LOCK_MASK,
     MOD2_MASK,
     PAGE_SIZE_CHOICES,
@@ -332,7 +333,7 @@ class ConfigTest(unittest.TestCase):
         with open(self.path, "w") as fp:
             fp.write("{ not json")
         c = Config(self.path)
-        self.assertEqual(c.page_size, 9)
+        self.assertEqual(c.page_size, DEFAULTS["page_size"])
         self.assertTrue(c.enable_associate)
 
     def test_unknown_keys_dropped(self):
@@ -343,12 +344,12 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(c.page_size, 7)
 
     def test_page_size_10_survives_roundtrip(self):
-        """``page_size=10`` 必须被接受，否则会被**静默**改回 9。
+        """``page_size=10`` 必须被接受，否则会被**静默**改回默认值。
 
         ``Config.page_size`` 的写法是 ``value if value in PAGE_SIZE_CHOICES
-        else 9``——不在表里**不报错**、不提示，直接回落默认值。所以加了
-        10 这一档却漏更新可选表的话，首选项里明明能选到 10、一存盘再读
-        就变回 9，是最难查的一类问题。这条锁住「写进去读出来还是 10」。
+        else DEFAULTS["page_size"]``——不在表里**不报错**、不提示，直接回落。
+        所以可选表与默认值对不上号的话，首选项里明明能选到 10、一存盘再读
+        就变回去了，是最难查的一类问题。这条锁住「写进去读出来还是 10」。
         """
         c = Config(self.path)
         c.set("page_size", 10)
@@ -359,11 +360,39 @@ class ConfigTest(unittest.TestCase):
                          "PAGE_SIZE_CHOICES 里，被静默回落成默认值了"
                          % again.page_size)
 
+    def test_nine_is_no_longer_offered(self):
+        """9 已从可选表去掉，**老配置里残留的 9 也要回落成默认值**。
+
+        用户报「候选词9去掉」。9 与 10 只差一项，但只有 10 是 10 个数字键
+        各对应一项——9 时按 0 与按 9 落在同一项，0 白按。
+
+        这条同时守住两件事：可选表里别再有 9；以及**上一版装出来的
+        config.json 里写着的 9** 必须读得出来（``Config.page_size`` 的兜底
+        是静默回落，不走这条路的话老用户会留在一个非法档位上）。
+        「默认值也得在可选表里」由 test_default_is_one_of_the_offered_choices
+        单独盯——否则会出现默认 9、可选表没 9 的自相矛盾。
+        """
+        self.assertNotIn(9, PAGE_SIZE_CHOICES,
+                         "PAGE_SIZE_CHOICES 里还有 9——用户要求去掉")
+        c = Config(self.path)
+        c.set("page_size", 9)
+        c.save()
+        again = Config(self.path)          # 模拟上一版留下的老配置文件
+        self.assertEqual(again.page_size, DEFAULTS["page_size"],
+                         "已停用的 9 应当回落成默认值，实际 %r"
+                         % again.page_size)
+
     def test_invalid_page_size_falls_back_to_default(self):
-        """不在可选表里的值仍然回落 9（反向守卫，别把校验整个删掉）。"""
+        """不在可选表里的值回落默认值（反向守卫，别把校验整个删掉）。"""
         c = Config(self.path)
         c.set("page_size", 8)
-        self.assertEqual(c.page_size, 9)
+        self.assertEqual(c.page_size, DEFAULTS["page_size"])
+
+    def test_default_is_one_of_the_offered_choices(self):
+        """默认值本身必须在可选表里，否则一出生就是非法档位。"""
+        self.assertIn(DEFAULTS["page_size"], PAGE_SIZE_CHOICES,
+                      "默认页数 %r 不在 PAGE_SIZE_CHOICES %r 里"
+                      % (DEFAULTS["page_size"], list(PAGE_SIZE_CHOICES)))
 
     def test_hotkey_matching(self):
         hk = {"keyval": 0x20, "modifiers": 0}
@@ -457,7 +486,7 @@ class ConfigurableEngineTest(unittest.TestCase):
 
     def test_page_size_change_applies_without_restart(self):
         self.type("zhongguo")
-        self.assertEqual(len(self.ui.candidates), 9)
+        self.assertEqual(len(self.ui.candidates), DEFAULTS["page_size"])
         self.write_config(page_size=7)
         self.type_key("n")          # 触发 reload
         self.assertEqual(len(self.ui.candidates), 7)
@@ -683,7 +712,7 @@ class EngineTest(unittest.TestCase):
     def test_paging(self):
         self.type("c")          # 会命中大量词条，足够翻页
         first = list(self.ui.candidates)
-        self.assertEqual(len(first), 9)
+        self.assertEqual(len(first), DEFAULTS["page_size"])
         self.engine.turn_page(1)
         second = list(self.ui.candidates)
         self.assertNotEqual(first, second)
@@ -3347,7 +3376,7 @@ class DomainIndexMatchKindTest(unittest.TestCase):
 class DigitKeyBoundsTest(unittest.TestCase):
     """数字键映射必须跟着**当页实际候选数**走。
 
-    每页候选数可配 5 / 7 / 9 / 10（``PAGE_SIZE_CHOICES``），而
+    每页候选数可配 5 / 7 / 10（``PAGE_SIZE_CHOICES``），而
     ``_digit_index`` 原来写死「1..9 → 0..8、0 → 9」。于是 ``page_size=5``
     时按 6/7/8/9 全部越界，而 ``select()`` 的边界检查是**静默 return**
     ——那 4 个键变成「按了没反应」的死键。改候选数是常规操作，所以这个
@@ -3405,9 +3434,10 @@ class DigitKeyBoundsTest(unittest.TestCase):
         """上限 10：1~9 出第 1~9 个，0 出第 10 个，正好用满 10 个键。
 
         10 这一档特殊在**它是唯一一个 ``0`` 也参与直选的页长**——
-        5/7/9 时 ``0`` 是「当页最后一项」，10 时它恰好是第 10 项。
-        所以要盯死两件事：``10`` 得真的在可选表里（否则 ``Config.page_size``
-        会**静默回落 9**，首选项里选了也白选），以及 ``0`` 必须够得到第 10 个。
+        5/7/9 时 ``0`` 走 ``count - 1``，和最大的那个数字键指向同一项，10 时
+        它才独占第 10 项。所以要盯死两件事：``10`` 得真的在可选表里（否则
+        ``Config.page_size`` 会**静默回落默认值**，首选项里选了也白选），
+        以及 ``0`` 必须够得到第 10 个。
         """
         self.assertIn(10, PAGE_SIZE_CHOICES,
                       "PAGE_SIZE_CHOICES 缺 10——首选项下拉里也就不会有这一档")

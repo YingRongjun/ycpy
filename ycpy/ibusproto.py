@@ -62,7 +62,8 @@ def make_text(s: str) -> "dbus.Struct":
     )
 
 
-def make_lookup_table(candidates, cursor_pos: int, page_size: int = 9) -> "dbus.Struct":
+def make_lookup_table(candidates, cursor_pos: int,
+                       page_size: int = 10) -> "dbus.Struct":
     """构造一个 ``v`` 类型的 IBusLookupTable。"""
     cand = dbus.Array([make_text(c) for c in candidates], signature="v")
     return dbus.Struct(
