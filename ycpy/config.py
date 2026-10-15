@@ -81,8 +81,12 @@ _MIGRATIONS = (
     ("associate_key", _LEGACY_SEMICOLON_ASSOCIATE, DEFAULTS["associate_key"]),
 )
 
-#: 候选数量可选值
-PAGE_SIZE_CHOICES = (5, 7, 9)
+#: 候选数量可选值。
+#:
+#: 上限是 **10**——数字键总共只有 1~9 和 0 这 10 个，再多就没法用数字键
+#: 直选了。10 这一档靠 ``_digit_index`` 的「1~9 -> 第 1~9 项、0 -> 当页
+#: 最后一项」自然成立：``0`` 在当页正好有 10 个候选时落在第 10 项。
+PAGE_SIZE_CHOICES = (5, 7, 9, 10)
 
 
 class Config:

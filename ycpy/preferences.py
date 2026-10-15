@@ -140,12 +140,21 @@ class PreferencesWindow(Gtk.Window):
         self.page_size_combo.connect("changed", self._on_page_size_changed)
         grid.attach(self.page_size_combo, 1, 0, 1, 1)
 
-        grid.attach(Gtk.Label(label="配置文件:", xalign=1), 0, 1, 1, 1)
+        # 数字键的选法对 10 这一档才不显然（0 才轮得到第 10 个），
+        # 与「联想与学习」里那两条 hint 一样写清楚，省得用户按 0 没反应。
+        hint = Gtk.Label(
+            label="数字键 1~9 直选第 1~9 个，0 选当页最后一个；"
+                  "上限 10，正好用满这 10 个键。",
+            xalign=0, wrap=True)
+        hint.get_style_context().add_class("dim-label")
+        grid.attach(hint, 0, 1, 2, 1)
+
+        grid.attach(Gtk.Label(label="配置文件:", xalign=1), 0, 2, 1, 1)
         path_label = Gtk.Label(label=self.config.path, xalign=0)
         path_label.set_ellipsize(3)  # PANGO_ELLIPSIZE_END
         path_label.set_selectable(True)
         path_label.set_hexpand(True)
-        grid.attach(path_label, 1, 1, 1, 1)
+        grid.attach(path_label, 1, 2, 1, 1)
         return frame
 
     def _build_keys(self) -> Gtk.Widget:

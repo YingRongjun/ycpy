@@ -23,6 +23,7 @@ from ycpy.composer import Composer                           # noqa: E402
 from ycpy.config import (                                   # noqa: E402
     LOCK_MASK,
     MOD2_MASK,
+    PAGE_SIZE_CHOICES,
     SHIFT_MASK,
     Config,
     matches_hotkey,
@@ -340,6 +341,29 @@ class ConfigTest(unittest.TestCase):
         c = Config(self.path)
         self.assertNotIn("bogus", c.data)
         self.assertEqual(c.page_size, 7)
+
+    def test_page_size_10_survives_roundtrip(self):
+        """``page_size=10`` 必须被接受，否则会被**静默**改回 9。
+
+        ``Config.page_size`` 的写法是 ``value if value in PAGE_SIZE_CHOICES
+        else 9``——不在表里**不报错**、不提示，直接回落默认值。所以加了
+        10 这一档却漏更新可选表的话，首选项里明明能选到 10、一存盘再读
+        就变回 9，是最难查的一类问题。这条锁住「写进去读出来还是 10」。
+        """
+        c = Config(self.path)
+        c.set("page_size", 10)
+        c.save()
+        again = Config(self.path)
+        self.assertEqual(again.page_size, 10,
+                         "page_size=10 存盘后读回是 %r——它不在 "
+                         "PAGE_SIZE_CHOICES 里，被静默回落成默认值了"
+                         % again.page_size)
+
+    def test_invalid_page_size_falls_back_to_default(self):
+        """不在可选表里的值仍然回落 9（反向守卫，别把校验整个删掉）。"""
+        c = Config(self.path)
+        c.set("page_size", 8)
+        self.assertEqual(c.page_size, 9)
 
     def test_hotkey_matching(self):
         hk = {"keyval": 0x20, "modifiers": 0}
@@ -1933,6 +1957,47 @@ class PreferencesCloseTest(unittest.TestCase):
                          "又换回了返回元组的 lambda，那会让关闭按钮失效")
 
 
+class PageSizeChoiceInPreferencesTest(unittest.TestCase):
+    """首选项的「每页候选词数量」下拉必须给出 10 这一档。
+
+    用户报「候选词数量最多增加到10个（1到9和0），记得首选项也要改」。
+    下拉是**遍历 ``PAGE_SIZE_CHOICES``** 生成的，所以「首选项也要改」这件事
+    只有把 10 加进那张表才算真改了；漏了就会出现「配置里能写 10、首选项
+    里却看不到」。
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_combo_offers_ten_and_it_sticks(self):
+        from ycpy.preferences import PreferencesWindow
+        cfg = Config(os.path.join(self.tmp, "cfg.json"))
+        win = PreferencesWindow(cfg)
+        # set_active_id 找不到 id 时是**静默失败**（返回 False、active 不变），
+        # 所以必须再读回来确认，光看不报错不算数。
+        win.page_size_combo.set_active_id("10")
+        self.assertEqual(win.page_size_combo.get_active_id(), "10",
+                         "首选项下拉里选不到 10——PAGE_SIZE_CHOICES 缺这一档")
+        self.assertEqual(cfg.page_size, 10,
+                         "在首选项里选了 10，配置却没写进去")
+
+    def test_combo_labels_match_the_choices(self):
+        """下拉里的文字要和可选表一一对上，别出现多余或缺失的档位。"""
+        from ycpy.preferences import PreferencesWindow
+        cfg = Config(os.path.join(self.tmp, "cfg.json"))
+        win = PreferencesWindow(cfg)
+        model = win.page_size_combo.get_model()
+        labels = [row[0] for row in model]
+        self.assertEqual(labels, [str(n) for n in PAGE_SIZE_CHOICES],
+                         "首选项下拉的档位 %r 与 PAGE_SIZE_CHOICES %r 不符"
+                         % (labels, [str(n) for n in PAGE_SIZE_CHOICES]))
+
+
 class PressReleasePairingTest(unittest.TestCase):
     """每个键的抬起必须回放**它自己**按下的结论。
 
@@ -3282,10 +3347,11 @@ class DomainIndexMatchKindTest(unittest.TestCase):
 class DigitKeyBoundsTest(unittest.TestCase):
     """数字键映射必须跟着**当页实际候选数**走。
 
-    每页候选数可配 5 / 7 / 9（``PAGE_SIZE_CHOICES``），而 ``_digit_index``
-    原来写死「1..9 → 0..8、0 → 9」。于是 ``page_size=5`` 时按 6/7/8/9 全部
-    越界，而 ``select()`` 的边界检查是**静默 return** ——那 4 个键变成
-    「按了没反应」的死键。改候选数是常规操作，所以这个很容易撞上。
+    每页候选数可配 5 / 7 / 9 / 10（``PAGE_SIZE_CHOICES``），而
+    ``_digit_index`` 原来写死「1..9 → 0..8、0 → 9」。于是 ``page_size=5``
+    时按 6/7/8/9 全部越界，而 ``select()`` 的边界检查是**静默 return**
+    ——那 4 个键变成「按了没反应」的死键。改候选数是常规操作，所以这个
+    很容易撞上。
     """
 
     def setUp(self):
@@ -3307,7 +3373,7 @@ class DigitKeyBoundsTest(unittest.TestCase):
 
     def test_every_digit_selects_something(self):
         """当页有几个候选，按 1..当页数 就要都能选中。"""
-        for page_size in (5, 7, 9):
+        for page_size in PAGE_SIZE_CHOICES:
             engine = self._type_cxy(self.make(page_size))
             count = len(engine.page_candidates)
             self.assertEqual(count, page_size)
@@ -3320,7 +3386,7 @@ class DigitKeyBoundsTest(unittest.TestCase):
 
     def test_zero_selects_last_item_of_current_page(self):
         """``0`` 是「收尾键」，映射到**当页最后一项**，不是固定的第 10 项。"""
-        for page_size in (5, 7, 9):
+        for page_size in PAGE_SIZE_CHOICES:
             engine = self._type_cxy(self.make(page_size))
             last = engine.page_candidates[-1].text
             engine.process_key(ord("0"))
@@ -3334,6 +3400,35 @@ class DigitKeyBoundsTest(unittest.TestCase):
         """
         engine = self._type_cxy(self.make(5))
         self.assertTrue(engine.process_key(ord("9")), "越界数字键被透传给应用了")
+
+    def test_page_size_10_fills_all_ten_digit_keys(self):
+        """上限 10：1~9 出第 1~9 个，0 出第 10 个，正好用满 10 个键。
+
+        10 这一档特殊在**它是唯一一个 ``0`` 也参与直选的页长**——
+        5/7/9 时 ``0`` 是「当页最后一项」，10 时它恰好是第 10 项。
+        所以要盯死两件事：``10`` 得真的在可选表里（否则 ``Config.page_size``
+        会**静默回落 9**，首选项里选了也白选），以及 ``0`` 必须够得到第 10 个。
+        """
+        self.assertIn(10, PAGE_SIZE_CHOICES,
+                      "PAGE_SIZE_CHOICES 缺 10——首选项下拉里也就不会有这一档")
+
+        engine = self._type_cxy(self.make(10))
+        self.assertEqual(len(engine.page_candidates), 10,
+                         "page_size=10 却只摆出 %d 个候选"
+                         % len(engine.page_candidates))
+
+        tenth = engine.page_candidates[9].text
+        self.assertTrue(engine.process_key(ord("0")), "按 0 被透传给了应用")
+        self.assertEqual(engine._context, tenth,
+                         "page_size=10 时按 0 应选中第 10 个，实际 %r"
+                         % engine._context)
+
+        engine = self._type_cxy(self.make(10))
+        ninth = engine.page_candidates[8].text
+        engine.process_key(ord("9"))
+        self.assertEqual(engine._context, ninth,
+                         "page_size=10 时按 9 应选中第 9 个，实际 %r"
+                         % engine._context)
 
 
 class TabSelectIndexTest(unittest.TestCase):
